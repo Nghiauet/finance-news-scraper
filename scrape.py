@@ -6,9 +6,11 @@ Supported: cafef.vn, vnexpress.net, tinnhanhchungkhoan.vn,
            dantri.com.vn, tuoitre.vn, thanhnien.vn
 """
 
+import argparse
 import json
 import re
 import ssl
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,12 @@ from typing import Optional
 
 import httpx
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+import cache_client
+from llm_client import summarize
+
+load_dotenv()
 
 
 @dataclass
@@ -25,6 +33,7 @@ class Article:
     source: str
     published_at: Optional[str]
     content: str
+    summary: Optional[str] = None
 
 
 HEADERS = {
@@ -608,14 +617,35 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
     print(f"  Found {len(articles_meta)} articles, processing first {limit}...")
 
     results = []
-    for meta in articles_meta[:limit]:
+    for i, meta in enumerate(articles_meta[:limit]):
+        url = meta["url"]
         print(f"  -> {meta['title'][:60]}...")
-        article = source["extract_fn"](meta["url"])
+
+        # Check article content cache first
+        cached_content = cache_client.get_article(url)
+        if cached_content:
+            print(f"     [CACHE] Article hit")
+            article = Article(
+                title=meta["title"],
+                url=url,
+                source=source_name,
+                published_at=None,
+                content=cached_content,
+            )
+        else:
+            article = source["extract_fn"](url)
+            if article:
+                cache_client.set_article(url, article.content)
+
         if article:
+            article.summary = summarize(article.content)
             results.append(article)
             print(f"     [OK] {len(article.content)} chars extracted")
         else:
             print(f"     [SKIP] could not extract content")
+
+        if i < len(articles_meta[:limit]) - 1:
+            time.sleep(1)
 
     return results
 
@@ -632,11 +662,25 @@ def print_article(article: Article):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Scrape Vietnamese finance news.")
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Test mode: scrape only the first source with 3 articles",
+    )
+    args = parser.parse_args()
+
     all_articles: list[Article] = []
 
-    for source_name in SOURCES:
-        articles = scrape_source(source_name, limit=2)
+    if args.test:
+        first_source = next(iter(SOURCES))
+        print(f"[TEST MODE] Scraping only '{first_source}' — first 3 articles")
+        articles = scrape_source(first_source, limit=3)
         all_articles.extend(articles)
+    else:
+        for source_name in SOURCES:
+            articles = scrape_source(source_name, limit=2)
+            all_articles.extend(articles)
 
     print(f"\n\n{'='*60}")
     print(f"RESULTS: {len(all_articles)} articles extracted")
@@ -652,6 +696,7 @@ if __name__ == "__main__":
             "source": a.source,
             "published_at": a.published_at,
             "content": a.content,
+            "summary": a.summary,
         }
         for a in all_articles
     ]
