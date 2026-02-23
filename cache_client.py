@@ -1,9 +1,11 @@
 """
 Redis cache client for scrape-news.
-Caches: article content (by URL) and LLM summaries (by content hash).
+Caches: article content (by URL), LLM summaries (by content hash),
+        and news lists per source (key: "news:<source>").
 """
 
 import hashlib
+import json
 import os
 
 import redis
@@ -11,6 +13,7 @@ import redis
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:12209")
 _ARTICLE_TTL = int(os.environ.get("CACHE_ARTICLE_TTL", 18000))   # 5h
 _SUMMARY_TTL = int(os.environ.get("CACHE_SUMMARY_TTL", 18000))   # 5h (depends on content)
+_NEWS_TTL    = int(os.environ.get("CACHE_NEWS_TTL",    7200))    # 2h (buffer beyond 1h cron)
 
 _client: redis.Redis | None = None
 
@@ -79,5 +82,30 @@ def set_summary(content: str, summary: str) -> None:
         return
     try:
         r.setex(_content_key(content), _SUMMARY_TTL, summary)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# News list cache  (key: "news:<source>")
+# ---------------------------------------------------------------------------
+
+def get_news(source: str) -> list[dict]:
+    r = _get_client()
+    if r is None:
+        return []
+    try:
+        raw = r.get(f"news:{source}")
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+
+def set_news(source: str, articles: list[dict]) -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.setex(f"news:{source}", _NEWS_TTL, json.dumps(articles, ensure_ascii=False))
     except Exception:
         pass
