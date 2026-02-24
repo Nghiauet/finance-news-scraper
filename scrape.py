@@ -51,6 +51,8 @@ def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
         if weak_ssl:
             ctx = ssl.create_default_context()
             ctx.set_ciphers("DEFAULT@SECLEVEL=1")
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
             resp = httpx.get(url, headers=HEADERS, timeout=10, follow_redirects=True, verify=ctx)
         else:
             resp = httpx.get(url, headers=HEADERS, timeout=10, follow_redirects=True)
@@ -558,51 +560,61 @@ SOURCES = {
         "list_fn": get_cafef_list,
         "extract_fn": extract_cafef,
         "default_url": "https://cafef.vn/thi-truong-chung-khoan.chn",
+        "domain": "cafef.vn",
     },
     "vnexpress": {
         "list_fn": get_vnexpress_list,
         "extract_fn": extract_vnexpress,
         "default_url": "https://vnexpress.net/kinh-doanh",
+        "domain": "vnexpress.net",
     },
     "tinnhanhchungkhoan": {
         "list_fn": get_tnnck_list,
         "extract_fn": extract_tnnck,
         "default_url": "https://tinnhanhchungkhoan.vn/chung-khoan/",
+        "domain": "tinnhanhchungkhoan.vn",
     },
     "ndh": {
         "list_fn": get_ndh_list,
         "extract_fn": extract_ndh,
         "default_url": "https://ndh.vn/chung-khoan.htm",
+        "domain": "ndh.vn",
     },
     "baodautu": {
         "list_fn": get_baodautu_list,
         "extract_fn": extract_baodautu,
         "default_url": "https://baodautu.vn/chung-khoan-d1.html",
+        "domain": "baodautu.vn",
     },
     "vietnambiz": {
         "list_fn": get_vietnambiz_list,
         "extract_fn": extract_vietnambiz,
         "default_url": "https://vietnambiz.vn/tai-chinh.htm",
+        "domain": "vietnambiz.vn",
     },
     "vietstock": {
         "list_fn": get_vietstock_list,
         "extract_fn": extract_vietstock,
         "default_url": "https://vietstock.vn/chung-khoan.htm",
+        "domain": "vietstock.vn",
     },
     "dantri": {
         "list_fn": get_dantri_list,
         "extract_fn": extract_dantri,
         "default_url": "https://dantri.com.vn/kinh-doanh.htm",
+        "domain": "dantri.com.vn",
     },
     "tuoitre": {
         "list_fn": get_tuoitre_list,
         "extract_fn": extract_tuoitre,
         "default_url": "https://tuoitre.vn/kinh-te.htm",
+        "domain": "tuoitre.vn",
     },
     "thanhnien": {
         "list_fn": get_thanhnien_list,
         "extract_fn": extract_thanhnien,
         "default_url": "https://thanhnien.vn/kinh-te.htm",
+        "domain": "thanhnien.vn",
     },
 }
 
@@ -621,24 +633,25 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
         url = meta["url"]
         print(f"  -> {meta['title'][:60]}...")
 
-        # Check article content cache first
-        cached_content = cache_client.get_article(url)
-        if cached_content:
+        # Check article cache first (stores content + published_at)
+        cached = cache_client.get_article(url)
+        if cached:
             print(f"     [CACHE] Article hit")
             article = Article(
                 title=meta["title"],
                 url=url,
-                source=source_name,
-                published_at=None,
-                content=cached_content,
+                source=source["domain"],
+                published_at=cached.get("published_at"),
+                content=cached.get("content", ""),
             )
         else:
             article = source["extract_fn"](url)
             if article:
-                cache_client.set_article(url, article.content)
+                cache_client.set_article(url, article.content, article.published_at)
 
         if article:
-            article.summary = summarize(article.content)
+            if article.content:
+                article.summary = summarize(article.content)
             results.append(article)
             print(f"     [OK] {len(article.content)} chars extracted")
         else:

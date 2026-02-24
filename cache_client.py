@@ -34,25 +34,39 @@ def _get_client() -> redis.Redis | None:
 
 
 # ---------------------------------------------------------------------------
-# Article content cache  (key: "article:<url>")
+# Article cache  (key: "article:<url>")
+# Stores JSON: {"content": str, "published_at": str|null}
 # ---------------------------------------------------------------------------
 
-def get_article(url: str) -> str | None:
+def get_article(url: str) -> dict | None:
+    """Return {"content": ..., "published_at": ...} or None."""
     r = _get_client()
     if r is None:
         return None
     try:
-        return r.get(f"article:{url}")
+        raw = r.get(f"article:{url}")
+        if not raw:
+            return None
+        # Migration: old entries stored plain content string, not JSON
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "content" in data:
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # Legacy plain-string entry
+        return {"content": raw, "published_at": None}
     except Exception:
         return None
 
 
-def set_article(url: str, content: str) -> None:
+def set_article(url: str, content: str, published_at: str | None = None) -> None:
     r = _get_client()
     if r is None:
         return
     try:
-        r.setex(f"article:{url}", _ARTICLE_TTL, content)
+        payload = json.dumps({"content": content, "published_at": published_at}, ensure_ascii=False)
+        r.setex(f"article:{url}", _ARTICLE_TTL, payload)
     except Exception:
         pass
 
