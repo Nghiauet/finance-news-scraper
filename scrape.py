@@ -32,6 +32,7 @@ class Article:
     summary: Optional[str] = None
     tickers: list = field(default_factory=list)
     icb_codes: list = field(default_factory=list)
+    thumbnail: Optional[dict] = None
 
 
 HEADERS = {
@@ -82,15 +83,34 @@ def get_article_links(url: str, domain: str, weak_ssl: bool = False) -> list[dic
     return [a for a in articles if not (a["url"] in seen or seen.add(a["url"]))]
 
 
-def get_page_text(url: str, weak_ssl: bool = False) -> Optional[str]:
-    """Fetch a page and return its visible text content."""
+def _extract_thumbnail(soup: BeautifulSoup) -> Optional[dict]:
+    """Extract thumbnail from Open Graph meta tags."""
+    og_img = soup.find("meta", property="og:image")
+    if not og_img or not og_img.get("content"):
+        return None
+    thumb = {"url": og_img["content"]}
+    og_w = soup.find("meta", property="og:image:width")
+    og_h = soup.find("meta", property="og:image:height")
+    og_alt = soup.find("meta", property="og:image:alt")
+    if og_w and og_w.get("content", "").isdigit():
+        thumb["width"] = int(og_w["content"])
+    if og_h and og_h.get("content", "").isdigit():
+        thumb["height"] = int(og_h["content"])
+    if og_alt and og_alt.get("content"):
+        thumb["alt"] = og_alt["content"]
+    return thumb
+
+
+def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
+    """Fetch a page and return (visible_text, thumbnail_dict)."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
-        return None
+        return None, None
+    thumbnail = _extract_thumbnail(soup)
     for tag in soup.select("script, style, nav, footer, header, aside"):
         tag.decompose()
     lines = [line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip()]
-    return "\n".join(lines)
+    return "\n".join(lines), thumbnail
 
 
 SOURCES = {
@@ -135,11 +155,12 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 summary=cached.get("summary"),
                 tickers=cached.get("tickers", []),
                 icb_codes=cached.get("icb_codes", []),
+                thumbnail=cached.get("thumbnail"),
             )
             results.append(article)
             continue
 
-        page_text = get_page_text(url, weak_ssl=weak_ssl)
+        page_text, thumbnail = get_page_data(url, weak_ssl=weak_ssl)
         if not page_text:
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
@@ -154,20 +175,36 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 summary=parsed.get("summary"),
                 tickers=parsed.get("tickers", []),
                 icb_codes=parsed.get("icb_codes", []),
+                thumbnail=thumbnail,
             )
             cache_client.set_article(
                 url, article.title, article.published_at, article.summary,
-                article.tickers, article.icb_codes,
+                article.tickers, article.icb_codes, article.thumbnail,
             )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
         else:
             log.warning("[%s] [%s] LLM failed — skipping", source_name, n)
 
-        if i < len(articles_meta[:limit]) - 1:
-            time.sleep(1)
 
     log.info("[%s] finished: %d/%d articles in %.1fs", source_name, len(results), limit, time.monotonic() - t_source)
+
+    if results:
+        payload = [
+            {
+                "title": a.title,
+                "url": a.url,
+                "source": a.source,
+                "published_at": a.published_at,
+                "summary": a.summary,
+                "tickers": a.tickers,
+                "icb_codes": a.icb_codes,
+                "thumbnail": a.thumbnail,
+            }
+            for a in results
+        ]
+        cache_client.set_news(source_name, payload)
+
     return results
 
 

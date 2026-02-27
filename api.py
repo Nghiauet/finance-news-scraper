@@ -56,12 +56,20 @@ def _normalize_article(raw: dict) -> dict:
         "summary": raw.get("summary"),
         "tickers": raw.get("tickers", []),
         "icb_codes": raw.get("icb_codes", []),
+        "thumbnail": raw.get("thumbnail"),
     }
 
 
 # ---------------------------------------------------------------------------
 # Pydantic models
 # ---------------------------------------------------------------------------
+
+class Thumbnail(BaseModel):
+    url: str
+    width: Optional[int] = None
+    height: Optional[int] = None
+    alt: Optional[str] = None
+
 
 class ArticleItem(BaseModel):
     id: str
@@ -72,6 +80,7 @@ class ArticleItem(BaseModel):
     summary: Optional[str] = None
     tickers: list[str] = []
     icb_codes: list[str] = []
+    thumbnail: Optional[Thumbnail] = None
 
 
 class Pagination(BaseModel):
@@ -123,6 +132,7 @@ async def _refresh_all():
                     "summary": a.summary,
                     "tickers": a.tickers,
                     "icb_codes": a.icb_codes,
+                    "thumbnail": a.thumbnail,
                 }
                 for a in articles
             ]
@@ -143,6 +153,10 @@ async def _refresh_loop():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Rebuild news lists from any cached articles so data is available immediately
+    rebuilt = cache_client.rebuild_news_from_articles(SOURCES)
+    if rebuilt:
+        log.info("Rebuilt %d news lists from cached articles on startup", rebuilt)
     task = asyncio.create_task(_refresh_loop())
     yield
     task.cancel()

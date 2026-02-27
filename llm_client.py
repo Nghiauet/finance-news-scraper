@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from typing import Optional
 
@@ -14,6 +15,8 @@ log = logging.getLogger(__name__)
 _client: Optional[OpenAI] = None
 _MODEL: Optional[str] = None
 _MAX_INPUT_CHARS: int = int(os.environ.get("LLM_MAX_INPUT_CHARS", 32000))
+_CALL_DELAY: float = float(os.environ.get("LLM_CALL_DELAY", 2))
+_call_lock = threading.Lock()
 
 _SYSTEM_PROMPT = """You are an expert Vietnamese financial news analyst.
 
@@ -76,31 +79,33 @@ def extract_and_summarize(text: str) -> Optional[dict]:
     truncated = text[:_MAX_INPUT_CHARS] if len(text) > _MAX_INPUT_CHARS else text
 
     client, model = _get_client()
-    for attempt in range(2):
-        try:
-            t0 = time.monotonic()
-            resp = client.beta.chat.completions.parse(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": truncated},
-                ],
-                response_format=ArticleExtraction,
-                temperature=0.7,
-            )
-            elapsed = time.monotonic() - t0
-            choice = resp.choices[0]
-            finish_reason = choice.finish_reason
-            if finish_reason == "length":
-                log.warning("LLM output truncated (finish_reason=length)")
-            extraction = choice.message.parsed
-            result = extraction.model_dump()
-            cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
-            log.info("LLM OK (%.1fs, finish_reason=%s)", elapsed, finish_reason)
-            return result
-        except Exception as e:
-            log.warning("LLM attempt %d failed: %s", attempt + 1, e)
-            if attempt == 1:
-                break
-    log.error("LLM failed after 2 attempts — skipping article")
-    return None
+    with _call_lock:
+        for attempt in range(2):
+            try:
+                t0 = time.monotonic()
+                resp = client.beta.chat.completions.parse(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "user", "content": truncated},
+                    ],
+                    response_format=ArticleExtraction,
+                    temperature=0.7,
+                )
+                elapsed = time.monotonic() - t0
+                choice = resp.choices[0]
+                finish_reason = choice.finish_reason
+                if finish_reason == "length":
+                    log.warning("LLM output truncated (finish_reason=length)")
+                extraction = choice.message.parsed
+                result = extraction.model_dump()
+                cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
+                log.info("LLM OK (%.1fs, finish_reason=%s)", elapsed, finish_reason)
+                time.sleep(_CALL_DELAY)
+                return result
+            except Exception as e:
+                log.warning("LLM attempt %d failed: %s", attempt + 1, e)
+                if attempt == 1:
+                    break
+        log.error("LLM failed after 2 attempts — skipping article")
+        return None
