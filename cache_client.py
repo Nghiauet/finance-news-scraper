@@ -66,8 +66,8 @@ def set_article(
     published_at: str | None = None,
     summary: str | None = None,
     tickers: list | None = None,
-    icb_codes: list | None = None,
     thumbnail: dict | None = None,
+    content: str | None = None,
 ) -> None:
     r = _get_client()
     if r is None:
@@ -79,8 +79,8 @@ def set_article(
                 "published_at": published_at,
                 "summary": summary,
                 "tickers": tickers or [],
-                "icb_codes": icb_codes or [],
                 "thumbnail": thumbnail,
+                "content": content,
             },
             ensure_ascii=False,
         )

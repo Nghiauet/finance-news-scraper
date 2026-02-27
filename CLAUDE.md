@@ -70,11 +70,11 @@ No per-source parsing logic or regex. The LLM handles all article parsing and su
 
 ### Article schema
 
-`{ id, title, url, source, published_at, summary, tickers, icb_codes }`
+`{ id, title, url, source, published_at, summary, tickers, thumbnail }`
 
 ### Core abstractions in scrape.py
 
-- `Article` dataclass — `title`, `url`, `source`, `published_at`, `summary`, `tickers`, `icb_codes`
+- `Article` dataclass — `title`, `url`, `source`, `published_at`, `summary`, `tickers`, `thumbnail`
 - `fetch_html(url, weak_ssl)` — shared HTTP fetcher
 - `get_article_links(url, domain)` — generic link extraction via `h2 a, h3 a` CSS selectors
 - `get_page_text(url)` — strips scripts/styles/nav and returns visible text
@@ -93,7 +93,7 @@ No per-source parsing logic or regex. The LLM handles all article parsing and su
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | `{title, published_at, summary, tickers, icb_codes}` JSON | 5h |
+| `article:<url>` | `{title, published_at, summary, tickers, thumbnail}` JSON | 5h |
 | `summary:<sha256>` | LLM JSON result | 5h |
 | `news:<source>` | Article list JSON | 2h |
 

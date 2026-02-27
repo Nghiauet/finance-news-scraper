@@ -1,8 +1,8 @@
 """
 FastAPI server for the Vietnamese finance news scraper.
 
-  - GET /news          → list (id, title, url, source, published_at, summary)
-  - GET /news/{id}     → same fields, single article
+  - GET /news          → list (id, title, url, source, published_at, summary, tickers, thumbnail)
+  - GET /news/{id}     → same fields + content (full article text)
   - Background cron (every 1h) → scrapes all sources, stores in Redis
 
 Run with:
@@ -55,8 +55,8 @@ def _normalize_article(raw: dict) -> dict:
         "published_at": raw.get("published_at"),
         "summary": raw.get("summary"),
         "tickers": raw.get("tickers", []),
-        "icb_codes": raw.get("icb_codes", []),
         "thumbnail": raw.get("thumbnail"),
+        "content": raw.get("content"),
     }
 
 
@@ -79,8 +79,8 @@ class ArticleItem(BaseModel):
     published_at: Optional[str] = None
     summary: Optional[str] = None
     tickers: list[str] = []
-    icb_codes: list[str] = []
     thumbnail: Optional[Thumbnail] = None
+    content: Optional[str] = None
 
 
 class Pagination(BaseModel):
@@ -131,8 +131,8 @@ async def _refresh_all():
                     "published_at": a.published_at,
                     "summary": a.summary,
                     "tickers": a.tickers,
-                    "icb_codes": a.icb_codes,
                     "thumbnail": a.thumbnail,
+                    "content": a.content,
                 }
                 for a in articles
             ]

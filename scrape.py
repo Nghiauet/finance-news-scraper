@@ -31,8 +31,8 @@ class Article:
     published_at: Optional[str] = None
     summary: Optional[str] = None
     tickers: list = field(default_factory=list)
-    icb_codes: list = field(default_factory=list)
     thumbnail: Optional[dict] = None
+    content: Optional[str] = None
 
 
 HEADERS = {
@@ -154,8 +154,8 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 published_at=cached.get("published_at"),
                 summary=cached.get("summary"),
                 tickers=cached.get("tickers", []),
-                icb_codes=cached.get("icb_codes", []),
                 thumbnail=cached.get("thumbnail"),
+                content=cached.get("content"),
             )
             results.append(article)
             continue
@@ -174,12 +174,12 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 published_at=parsed.get("published_at"),
                 summary=parsed.get("summary"),
                 tickers=parsed.get("tickers", []),
-                icb_codes=parsed.get("icb_codes", []),
                 thumbnail=thumbnail,
+                content=parsed.get("content"),
             )
             cache_client.set_article(
                 url, article.title, article.published_at, article.summary,
-                article.tickers, article.icb_codes, article.thumbnail,
+                article.tickers, article.thumbnail, article.content,
             )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
@@ -198,8 +198,8 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 "published_at": a.published_at,
                 "summary": a.summary,
                 "tickers": a.tickers,
-                "icb_codes": a.icb_codes,
                 "thumbnail": a.thumbnail,
+                "content": a.content,
             }
             for a in results
         ]
