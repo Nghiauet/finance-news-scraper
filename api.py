@@ -12,6 +12,7 @@ Run with:
 import asyncio
 import hashlib
 import logging
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -30,7 +31,8 @@ from scrape import SOURCES, scrape_source  # noqa: E402
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-ARTICLES_PER_SOURCE = 10
+ARTICLES_PER_SOURCE = int(os.environ.get("ARTICLES_PER_SOURCE", 10))
+MAX_TOTAL_NEWS = int(os.environ.get("MAX_TOTAL_NEWS", 200))
 
 
 # ---------------------------------------------------------------------------
@@ -52,6 +54,8 @@ def _normalize_article(raw: dict) -> dict:
         "source": raw.get("source", ""),
         "published_at": raw.get("published_at"),
         "summary": raw.get("summary"),
+        "tickers": raw.get("tickers", []),
+        "icb_codes": raw.get("icb_codes", []),
     }
 
 
@@ -66,6 +70,8 @@ class ArticleItem(BaseModel):
     source: str
     published_at: Optional[str] = None
     summary: Optional[str] = None
+    tickers: list[str] = []
+    icb_codes: list[str] = []
 
 
 class Pagination(BaseModel):
@@ -98,8 +104,14 @@ class NewsDetailResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 async def _refresh_all():
-    log.info("[CRON] News refresh started")
-    for source_name, source in SOURCES.items():
+    sources = list(SOURCES)
+    total = len(sources)
+    t_all = time.monotonic()
+    log.info("[CRON] refresh started — %d sources", total)
+    ok = 0
+    for idx, source_name in enumerate(sources, 1):
+        t_src = time.monotonic()
+        log.info("[CRON] [%d/%d] %s — starting", idx, total, source_name)
         try:
             articles = await asyncio.to_thread(scrape_source, source_name, ARTICLES_PER_SOURCE)
             payload = [
@@ -109,14 +121,18 @@ async def _refresh_all():
                     "source": a.source,
                     "published_at": a.published_at,
                     "summary": a.summary,
+                    "tickers": a.tickers,
+                    "icb_codes": a.icb_codes,
                 }
                 for a in articles
             ]
             cache_client.set_news(source_name, payload)
-            log.info(f"[CRON] {source_name}: {len(payload)} articles stored")
+            ok += 1
+            log.info("[CRON] [%d/%d] %s — stored %d articles in %.1fs",
+                     idx, total, source_name, len(payload), time.monotonic() - t_src)
         except Exception as e:
-            log.error(f"[CRON] {source_name} failed: {e}")
-    log.info("[CRON] News refresh done")
+            log.error("[CRON] [%d/%d] %s — failed: %s", idx, total, source_name, e)
+    log.info("[CRON] refresh done — %d/%d sources ok in %.1fs", ok, total, time.monotonic() - t_all)
 
 
 async def _refresh_loop():
@@ -173,11 +189,23 @@ def get_news(
         raise HTTPException(status_code=400, detail=f"Unknown source '{source}'.")
 
     sources_to_query = [source] if source else list(SOURCES)
-    raw_articles: list[dict] = []
-    for name in sources_to_query:
-        raw_articles.extend(cache_client.get_news(name))
+
+    if source:
+        raw_articles: list[dict] = cache_client.get_news(source)
+    else:
+        # Interleave round-robin so no single source dominates the feed
+        buckets = [cache_client.get_news(name) for name in sources_to_query]
+        raw_articles = [
+            article
+            for i in range(max((len(b) for b in buckets), default=0))
+            for bucket in buckets
+            if i < len(bucket)
+            for article in [bucket[i]]
+        ]
 
     normalized = [_normalize_article(a) for a in raw_articles]
+    if MAX_TOTAL_NEWS > 0:
+        normalized = normalized[:MAX_TOTAL_NEWS]
     total = len(normalized)
 
     start = 0

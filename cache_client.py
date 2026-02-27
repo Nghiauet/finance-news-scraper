@@ -6,12 +6,15 @@ Caches: article data (by URL), LLM results (by content hash),
 
 import hashlib
 import json
+import logging
 import os
 
 import redis
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger(__name__)
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:12209")
 _ARTICLE_TTL = int(os.environ.get("CACHE_ARTICLE_TTL", 18000))   # 5h
@@ -29,9 +32,9 @@ def _get_client() -> redis.Redis | None:
         r = redis.from_url(_REDIS_URL, decode_responses=True, socket_connect_timeout=2)
         r.ping()
         _client = r
-        print(f"  [CACHE] Connected to Redis at {_REDIS_URL}")
+        log.info("Connected to Redis at %s", _REDIS_URL)
     except Exception as e:
-        print(f"  [CACHE] Redis unavailable ({e}) — running without cache")
+        log.warning("Redis unavailable (%s) — running without cache", e)
         _client = None
     return _client
 
@@ -57,12 +60,28 @@ def get_article(url: str) -> dict | None:
         return None
 
 
-def set_article(url: str, title: str, published_at: str | None = None, summary: str | None = None) -> None:
+def set_article(
+    url: str,
+    title: str,
+    published_at: str | None = None,
+    summary: str | None = None,
+    tickers: list | None = None,
+    icb_codes: list | None = None,
+) -> None:
     r = _get_client()
     if r is None:
         return
     try:
-        payload = json.dumps({"title": title, "published_at": published_at, "summary": summary}, ensure_ascii=False)
+        payload = json.dumps(
+            {
+                "title": title,
+                "published_at": published_at,
+                "summary": summary,
+                "tickers": tickers or [],
+                "icb_codes": icb_codes or [],
+            },
+            ensure_ascii=False,
+        )
         r.setex(f"article:{url}", _ARTICLE_TTL, payload)
     except Exception:
         pass

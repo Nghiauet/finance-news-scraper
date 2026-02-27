@@ -34,6 +34,8 @@ Copy `.env` and set these variables before running:
 | `LLM_MODEL` | Model name (e.g. `gpt-4o`) |
 | `REDIS_URL` | Redis connection (default: `redis://localhost:12209`) |
 
+Limit overrides (optional): `ARTICLES_PER_SOURCE` (default 10), `MAX_TOTAL_NEWS` (default 200, 0 = unlimited).
+
 TTL overrides (optional): `CACHE_ARTICLE_TTL`, `CACHE_SUMMARY_TTL`, `CACHE_NEWS_TTL`.
 
 ## Architecture
@@ -68,11 +70,11 @@ No per-source parsing logic or regex. The LLM handles all article parsing and su
 
 ### Article schema
 
-`{ id, title, url, source, published_at, summary }`
+`{ id, title, url, source, published_at, summary, tickers, icb_codes }`
 
 ### Core abstractions in scrape.py
 
-- `Article` dataclass — `title`, `url`, `source`, `published_at`, `summary`
+- `Article` dataclass — `title`, `url`, `source`, `published_at`, `summary`, `tickers`, `icb_codes`
 - `fetch_html(url, weak_ssl)` — shared HTTP fetcher
 - `get_article_links(url, domain)` — generic link extraction via `h2 a, h3 a` CSS selectors
 - `get_page_text(url)` — strips scripts/styles/nav and returns visible text
@@ -91,7 +93,7 @@ No per-source parsing logic or regex. The LLM handles all article parsing and su
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | `{title, published_at, summary}` JSON | 5h |
+| `article:<url>` | `{title, published_at, summary, tickers, icb_codes}` JSON | 5h |
 | `summary:<sha256>` | LLM JSON result | 5h |
 | `news:<source>` | Article list JSON | 2h |
 
