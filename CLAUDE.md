@@ -42,42 +42,42 @@ The project has two modes: a **CLI batch scraper** and a **FastAPI server** back
 
 ### Module overview
 
-- **`scrape.py`** — core scraping logic + CLI entrypoint. Exports `SOURCES` and `scrape_source()`.
+- **`scrape.py`** — generic scraping + CLI entrypoint. Exports `SOURCES` and `scrape_source()`.
 - **`api.py`** — FastAPI app. Background task refreshes all sources every hour; serves list/detail endpoints from Redis.
 - **`cache_client.py`** — Redis wrapper with graceful degradation (no-ops when Redis is unavailable).
-- **`llm_client.py`** — OpenAI-compatible client; generates Vietnamese finance summaries.
+- **`llm_client.py`** — OpenAI-compatible client; extracts title, date, and summary from raw page text via LLM.
 
 ### Data flow
 
 ```
-category page → article list → full article → LLM summary → Redis / JSON file
+category page → article links (generic CSS) → page text → LLM extract+summarize → Redis / JSON
 ```
 
-First refresh runs at startup; Redis is optional (scraping still works without it).
+No per-source parsing logic or regex. The LLM handles all article parsing and summarization in one call.
 
 ### API endpoints
 
-- `GET /news` — list (no content body). Query params: `source`, `limit` (default 20), `cursor` (pagination).
-- `GET /news/{id}` — full detail including `content`.
+- `GET /news` — list. Query params: `source`, `limit` (default 20), `cursor` (pagination).
+- `GET /news/{id}` — single article detail.
 - Response envelope: `{ success, data, pagination, meta: { request_id, took_ms } }`
 - Error envelope: `{ success: false, error: { code, message } }`
 - `id` is a stable 18-digit numeric string derived from `sha256(url)`.
-- `published_at` is normalized to ISO 8601 (`2026-02-24T10:40:00+07:00`) or `null`.
-- `source` is always the canonical domain (e.g. `cafef.vn`, never `cafef`).
-- `summary` is plain text — emojis and markdown stripped at the API layer.
+- `published_at` is ISO 8601 (normalized by LLM) or `null`.
+- `source` is the canonical domain (e.g. `cafef.vn`).
+- `summary` is plain text.
+
+### Article schema
+
+`{ id, title, url, source, published_at, summary }`
 
 ### Core abstractions in scrape.py
 
-- `Article` dataclass — `title`, `url`, `source`, `published_at`, `content`, `summary`
-- `fetch_html(url, weak_ssl)` — shared HTTP fetcher; `weak_ssl=True` lowers cipher security for sites with broken DH keys (e.g. ndh.vn)
-- `SOURCES` dict — registry mapping source name → `{list_fn, extract_fn, default_url, domain}`
-- `scrape_source(source_name, limit)` → `list[Article]` — orchestrates list → extract → cache → summarize
-
-### Per-source pattern
-
-Each source implements two functions:
-- `get_<source>_list(category_url)` → `list[dict]` — scrapes article links from a category page
-- `extract_<source>(url)` → `Optional[Article]` — fetches and parses a single article
+- `Article` dataclass — `title`, `url`, `source`, `published_at`, `summary`
+- `fetch_html(url, weak_ssl)` — shared HTTP fetcher
+- `get_article_links(url, domain)` — generic link extraction via `h2 a, h3 a` CSS selectors
+- `get_page_text(url)` — strips scripts/styles/nav and returns visible text
+- `SOURCES` dict — `{url, domain, weak_ssl?}` per source
+- `scrape_source(source_name, limit)` → `list[Article]`
 
 ### Source status
 
@@ -85,22 +85,16 @@ Each source implements two functions:
 |---|---|
 | cafef, vnexpress, tinnhanhchungkhoan, vietnambiz, vietstock, dantri, tuoitre, thanhnien | Working |
 | ndh | Broken root cert — `weak_ssl=True` required |
-| baodautu | JS-rendered body — list works, article content empty |
-
-### Link detection strategies
-
-Most sources: `h2 a, h3 a` CSS selectors
-- **baodautu**: regex `baodautu\.vn/.+-d\d+\.html`
-- **vietstock**: regex `vietstock\.vn/\d{4}/\d{2}/.+\.htm`
+| baodautu | JS-rendered body — links found but content may be empty |
 
 ### Redis cache keys
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | Raw article text | 5h |
-| `summary:<sha256>` | LLM summary | 5h |
-| `news:<source>` | Full article list JSON | 2h |
+| `article:<url>` | `{title, published_at, summary}` JSON | 5h |
+| `summary:<sha256>` | LLM JSON result | 5h |
+| `news:<source>` | Article list JSON | 2h |
 
 ### CLI output
 
-Saved to `data/articles_YYYYMMDD_HHMMSS.json`. Each entry: `{title, url, source, published_at, content, summary}`.
+Saved to `data/articles_YYYYMMDD_HHMMSS.json`. Each entry: `{title, url, source, published_at, summary}`.

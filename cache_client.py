@@ -1,6 +1,6 @@
 """
 Redis cache client for scrape-news.
-Caches: article content (by URL), LLM summaries (by content hash),
+Caches: article data (by URL), LLM results (by content hash),
         and news lists per source (key: "news:<source>").
 """
 
@@ -9,11 +9,14 @@ import json
 import os
 
 import redis
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:12209")
 _ARTICLE_TTL = int(os.environ.get("CACHE_ARTICLE_TTL", 18000))   # 5h
-_SUMMARY_TTL = int(os.environ.get("CACHE_SUMMARY_TTL", 18000))   # 5h (depends on content)
-_NEWS_TTL    = int(os.environ.get("CACHE_NEWS_TTL",    7200))    # 2h (buffer beyond 1h cron)
+_SUMMARY_TTL = int(os.environ.get("CACHE_SUMMARY_TTL", 18000))   # 5h
+_NEWS_TTL    = int(os.environ.get("CACHE_NEWS_TTL",    7200))    # 2h
 
 _client: redis.Redis | None = None
 
@@ -35,11 +38,10 @@ def _get_client() -> redis.Redis | None:
 
 # ---------------------------------------------------------------------------
 # Article cache  (key: "article:<url>")
-# Stores JSON: {"content": str, "published_at": str|null}
+# Stores JSON: {"title": str, "published_at": str|null, "summary": str|null}
 # ---------------------------------------------------------------------------
 
 def get_article(url: str) -> dict | None:
-    """Return {"content": ..., "published_at": ...} or None."""
     r = _get_client()
     if r is None:
         return None
@@ -47,32 +49,27 @@ def get_article(url: str) -> dict | None:
         raw = r.get(f"article:{url}")
         if not raw:
             return None
-        # Migration: old entries stored plain content string, not JSON
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict) and "content" in data:
-                return data
-        except (json.JSONDecodeError, TypeError):
-            pass
-        # Legacy plain-string entry
-        return {"content": raw, "published_at": None}
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+        return None
     except Exception:
         return None
 
 
-def set_article(url: str, content: str, published_at: str | None = None) -> None:
+def set_article(url: str, title: str, published_at: str | None = None, summary: str | None = None) -> None:
     r = _get_client()
     if r is None:
         return
     try:
-        payload = json.dumps({"content": content, "published_at": published_at}, ensure_ascii=False)
+        payload = json.dumps({"title": title, "published_at": published_at, "summary": summary}, ensure_ascii=False)
         r.setex(f"article:{url}", _ARTICLE_TTL, payload)
     except Exception:
         pass
 
 
 # ---------------------------------------------------------------------------
-# LLM summary cache  (key: "summary:<sha256 of content>")
+# LLM result cache  (key: "summary:<sha256 of content>")
 # ---------------------------------------------------------------------------
 
 def _content_key(content: str) -> str:

@@ -1,10 +1,9 @@
 """
 FastAPI server for the Vietnamese finance news scraper.
 
-Architecture:
-  - GET /news          → list (id, title, url, source, published_at, summary) + envelope
-  - GET /news/{id}     → detail (+ content) + envelope
-  - Background cron (every 1 h) → scrapes all sources, stores in Redis
+  - GET /news          → list (id, title, url, source, published_at, summary)
+  - GET /news/{id}     → same fields, single article
+  - Background cron (every 1h) → scrapes all sources, stores in Redis
 
 Run with:
     uv run uvicorn api:app --host 0.0.0.0 --port 46401 --reload
@@ -13,11 +12,9 @@ Run with:
 import asyncio
 import hashlib
 import logging
-import re
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -34,44 +31,6 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 ARTICLES_PER_SOURCE = 10
-_TZ_VN = timezone(timedelta(hours=7))
-
-# Strip Vietnamese day-of-week prefix (e.g. "Thứ ba, " or "Chủ Nhật, ")
-_VN_DOW = re.compile(r"^(?:Thứ\s+\w+|Chủ\s+Nhật)[,\s]*", re.IGNORECASE | re.UNICODE)
-# Strip trailing noise: "(GMT+7)", "| Thông tin", "(Dân trí)", etc.
-_TRAILING_JUNK = re.compile(r"\s*[|(].*$")
-_DATE_FORMATS = [
-    "%d/%m/%Y %H:%M:%S",
-    "%d/%m/%Y %H:%M",
-    "%d/%m/%Y",
-    "%d/%m/%Y - %H:%M",
-    "%d/%m/%Y - %H:%M:%S",
-    "%d-%m-%Y %H:%M:%S",
-    "%d-%m-%Y %H:%M",
-    "%d-%m-%Y",
-    "%d-%m-%Y, %H:%M",
-    "%H:%M %d/%m/%Y",
-    "%H:%M, %d/%m/%Y",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%d",
-]
-_EMOJI_RE = re.compile(
-    "["
-    "\U0001F600-\U0001F64F"  # emoticons
-    "\U0001F300-\U0001F5FF"  # misc symbols & pictographs
-    "\U0001F680-\U0001F6FF"  # transport & map
-    "\U0001F900-\U0001F9FF"  # supplemental symbols
-    "\U0001FA00-\U0001FA6F"  # chess symbols
-    "\U0001FA70-\U0001FAFF"  # symbols extended-A
-    "\u2600-\u26FF"          # misc symbols
-    "\u2700-\u27BF"          # dingbats
-    "\u200D"                 # zero-width joiner
-    "\uFE0F"                 # variation selector-16
-    "]+",
-    flags=re.UNICODE,
-)
-_MARKDOWN_BOLD = re.compile(r"\*\*(.*?)\*\*")
-_MARKDOWN_BULLET = re.compile(r"^[*\-]\s+", re.MULTILINE)
 
 
 # ---------------------------------------------------------------------------
@@ -84,44 +43,6 @@ def _make_id(url: str) -> str:
     return str(digest % (10 ** 18))
 
 
-def _normalize_published_at(raw: Optional[str]) -> Optional[str]:
-    """Best-effort parse to ISO 8601 with +07:00 offset, or None."""
-    if not raw:
-        return None
-    s = _VN_DOW.sub("", raw.strip()).strip()
-    if not s:
-        return None
-    # Try both with and without trailing junk stripped
-    candidates = [s, _TRAILING_JUNK.sub("", s).strip()]
-    for candidate in dict.fromkeys(candidates):  # dedupe, preserve order
-        if not candidate:
-            continue
-        try:
-            dt = datetime.fromisoformat(candidate)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=_TZ_VN)
-            return dt.isoformat()
-        except ValueError:
-            pass
-        for fmt in _DATE_FORMATS:
-            try:
-                dt = datetime.strptime(candidate, fmt).replace(tzinfo=_TZ_VN)
-                return dt.isoformat()
-            except ValueError:
-                continue
-    return None
-
-
-def _clean_summary(raw: Optional[str]) -> Optional[str]:
-    """Strip emojis and markdown formatting — presentation belongs to the frontend."""
-    if not raw:
-        return None
-    s = _EMOJI_RE.sub("", raw)
-    s = _MARKDOWN_BOLD.sub(r"\1", s)
-    s = _MARKDOWN_BULLET.sub("", s)
-    return s.strip() or None
-
-
 def _normalize_article(raw: dict) -> dict:
     url = raw.get("url", "")
     return {
@@ -129,9 +50,8 @@ def _normalize_article(raw: dict) -> dict:
         "title": raw.get("title", ""),
         "url": url,
         "source": raw.get("source", ""),
-        "published_at": _normalize_published_at(raw.get("published_at")),
-        "summary": _clean_summary(raw.get("summary")),
-        "content": raw.get("content", ""),
+        "published_at": raw.get("published_at"),
+        "summary": raw.get("summary"),
     }
 
 
@@ -139,21 +59,17 @@ def _normalize_article(raw: dict) -> dict:
 # Pydantic models
 # ---------------------------------------------------------------------------
 
-class ArticleListItem(BaseModel):
+class ArticleItem(BaseModel):
     id: str
     title: str
     url: str
     source: str
-    published_at: Optional[str]
-    summary: Optional[str]
-
-
-class ArticleDetail(ArticleListItem):
-    content: str
+    published_at: Optional[str] = None
+    summary: Optional[str] = None
 
 
 class Pagination(BaseModel):
-    next_cursor: Optional[str]
+    next_cursor: Optional[str] = None
     has_more: bool
     limit: int
     total: int
@@ -166,14 +82,14 @@ class Meta(BaseModel):
 
 class NewsListResponse(BaseModel):
     success: bool = True
-    data: list[ArticleListItem]
+    data: list[ArticleItem]
     pagination: Pagination
     meta: Meta
 
 
 class NewsDetailResponse(BaseModel):
     success: bool = True
-    data: ArticleDetail
+    data: ArticleItem
     meta: Meta
 
 
@@ -183,7 +99,7 @@ class NewsDetailResponse(BaseModel):
 
 async def _refresh_all():
     log.info("[CRON] News refresh started")
-    for source_name in SOURCES:
+    for source_name, source in SOURCES.items():
         try:
             articles = await asyncio.to_thread(scrape_source, source_name, ARTICLES_PER_SOURCE)
             payload = [
@@ -192,7 +108,6 @@ async def _refresh_all():
                     "url": a.url,
                     "source": a.source,
                     "published_at": a.published_at,
-                    "content": a.content,
                     "summary": a.summary,
                 }
                 for a in articles
@@ -225,11 +140,7 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
-app = FastAPI(
-    title="Vietnam Finance News API",
-    version="2.0.0",
-    lifespan=lifespan,
-)
+app = FastAPI(title="Vietnam Finance News API", version="3.0.0", lifespan=lifespan)
 
 
 @app.exception_handler(HTTPException)
@@ -251,30 +162,16 @@ def health():
 
 @app.get("/news", response_model=NewsListResponse)
 def get_news(
-    source: Optional[str] = Query(
-        default=None,
-        description=(
-            "Filter by source name. Omit to get all sources. "
-            "Options: cafef, vnexpress, tinnhanhchungkhoan, ndh, baodautu, "
-            "vietnambiz, vietstock, dantri, tuoitre, thanhnien."
-        ),
-    ),
+    source: Optional[str] = Query(default=None, description="Filter by source name."),
     limit: int = Query(default=20, ge=1, le=100, description="Max items per page."),
-    cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last seen item)."),
+    cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
 ):
-    """
-    Return cached finance news list (no content body).
-    Data is refreshed automatically every hour from Redis.
-    Use GET /news/{id} to fetch full article content.
-    """
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
 
     if source and source not in SOURCES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown source '{source}'. Valid: {', '.join(sorted(SOURCES))}.",
-        )
+        raise HTTPException(status_code=400, detail=f"Unknown source '{source}'.")
+
     sources_to_query = [source] if source else list(SOURCES)
     raw_articles: list[dict] = []
     for name in sources_to_query:
@@ -283,7 +180,6 @@ def get_news(
     normalized = [_normalize_article(a) for a in raw_articles]
     total = len(normalized)
 
-    # Cursor pagination: resume after the item whose id == cursor
     start = 0
     if cursor:
         for i, item in enumerate(normalized):
@@ -295,7 +191,7 @@ def get_news(
     has_more = (start + limit) < total
     next_cursor = page[-1]["id"] if has_more and page else None
 
-    data = [ArticleListItem(**{k: v for k, v in a.items() if k != "content"}) for a in page]
+    data = [ArticleItem(**a) for a in page]
     took_ms = int((time.monotonic() - t0) * 1000)
 
     return NewsListResponse(
@@ -307,7 +203,6 @@ def get_news(
 
 @app.get("/news/{article_id}", response_model=NewsDetailResponse)
 def get_news_detail(article_id: str):
-    """Return full article detail including content body."""
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
 
@@ -317,7 +212,7 @@ def get_news_detail(article_id: str):
                 article = _normalize_article(raw)
                 took_ms = int((time.monotonic() - t0) * 1000)
                 return NewsDetailResponse(
-                    data=ArticleDetail(**article),
+                    data=ArticleItem(**article),
                     meta=Meta(request_id=request_id, took_ms=took_ms),
                 )
 
@@ -326,5 +221,4 @@ def get_news_detail(article_id: str):
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("api:app", host="0.0.0.0", port=46401, reload=True)

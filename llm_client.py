@@ -1,65 +1,80 @@
+import json
 import os
 from typing import Optional
 
-from dotenv import load_dotenv
 from openai import OpenAI
 
 import cache_client
 
-load_dotenv()
+_client: Optional[OpenAI] = None
+_MODEL: Optional[str] = None
 
-_client = OpenAI(
-    api_key=os.environ["LLM_API_KEY"],
-    base_url=os.environ["LLM_BASE_URL"],
-)
-_MODEL = os.environ["LLM_MODEL"]
+_SYSTEM_PROMPT = """You are an expert Vietnamese financial news analyst.
 
-_SYSTEM_PROMPT = """Bạn là chuyên gia phân tích tin tức tài chính. Nhiệm vụ của bạn là tóm tắt bài báo theo định dạng chuẩn bên dưới bằng tiếng Việt, giúp người đọc nắm bắt thông tin và ra quyết định nhanh chóng.
+From the article content below, extract and return a JSON object with exactly 3 fields:
 
-**ĐỊNH DẠNG BẮT BUỘC:**
+{
+  "title": "Article title in Vietnamese",
+  "published_at": "YYYY-MM-DDTHH:MM:SS+07:00 or null if not found",
+  "summary": "Comprehensive summary written in Vietnamese covering: the main event and when it occurred; all specific figures (prices, percentages, volumes, VND/USD amounts, stock tickers); causes or background context; market/corporate/investor reactions; expert opinions or outlook if available. Write as much as needed to cover all key information — do not truncate."
+}
 
-📌 **TÓM TẮT:** [1 câu ngắn gọn nêu rõ sự kiện chính]
-
-🔑 **ĐIỂM CHÍNH:**
-- [Số liệu / sự kiện cụ thể 1]
-- [Số liệu / sự kiện cụ thể 2]
-- [Số liệu / sự kiện cụ thể 3 — nếu có]
-
-📊 **TÁC ĐỘNG THỊ TRƯỜNG:** [Ảnh hưởng đến thị trường, ngành, hoặc tài sản liên quan]
-
-✅ **GỢI Ý HÀNH ĐỘNG:** [Khuyến nghị ngắn gọn dành cho nhà đầu tư: theo dõi, mua/bán/giữ, thận trọng...]
-
-**QUY TẮC:**
-- Ưu tiên số liệu cụ thể (%, giá trị, thời gian) hơn mô tả chung chung
-- Ngôn ngữ súc tích, rõ ràng — không viết dài dòng
-- Nếu bài báo không liên quan tài chính, chỉ điền mục TÓM TẮT và bỏ qua các mục còn lại
-"""
+RULES:
+- Return only the JSON object, nothing else
+- published_at must be ISO 8601 with +07:00 timezone, or null
+- summary must be plain continuous text in Vietnamese — no emojis, no markdown, no bullet points, no numbering
+- Preserve every specific number from the article (%, billion VND, VND, USD, stock prices, trading volumes, company names, stock codes)
+- If the article is short or thin on information, write everything available — do not fabricate"""
 
 
-def summarize(text: str) -> Optional[str]:
-    """Summarize article text via LLM. Uses Redis cache when available.
-    Retries once on LLM failure; returns None if both fail."""
+def _get_client() -> tuple[OpenAI, str]:
+    global _client, _MODEL
+    if _client is None:
+        _client = OpenAI(
+            api_key=os.environ["LLM_API_KEY"],
+            base_url=os.environ["LLM_BASE_URL"],
+        )
+        _MODEL = os.environ["LLM_MODEL"]
+    return _client, _MODEL
+
+
+def extract_and_summarize(text: str) -> Optional[dict]:
+    """Extract title, published_at, and summary from article text via LLM.
+    Uses Redis cache. Returns dict or None on failure."""
     cached = cache_client.get_summary(text)
     if cached:
-        print("  [CACHE] Summary hit")
-        return cached
+        print("     [CACHE] Summary hit")
+        try:
+            return json.loads(cached)
+        except (json.JSONDecodeError, TypeError):
+            return {"title": "", "published_at": None, "summary": cached}
 
+    # Truncate to avoid token limits
+    truncated = text[:6000] if len(text) > 6000 else text
+
+    client, model = _get_client()
     for attempt in range(2):
         try:
-            resp = _client.chat.completions.create(
-                model=_MODEL,
+            resp = client.chat.completions.create(
+                model=model,
                 messages=[
                     {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": text},
+                    {"role": "user", "content": truncated},
                 ],
                 temperature=0.3,
             )
-            result = resp.choices[0].message.content.strip()
-            cache_client.set_summary(text, result)
+            raw = resp.choices[0].message.content.strip()
+            # Strip markdown code fences if present
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1]
+                if raw.endswith("```"):
+                    raw = raw[:-3]
+                raw = raw.strip()
+            result = json.loads(raw)
+            cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
             return result
         except Exception as e:
             if attempt == 0:
-                print(f"  [LLM] Retry after error: {e}")
-    print("  [LLM] Failed after retry — skipping summary")
+                print(f"     [LLM] Retry after error: {e}")
+    print("     [LLM] Failed after retry — skipping")
     return None
-
