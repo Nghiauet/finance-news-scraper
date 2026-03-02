@@ -133,6 +133,7 @@ async def _refresh_all():
                     "tickers": a.tickers,
                     "thumbnail": a.thumbnail,
                     "content": a.content,
+                    "is_relevant": a.is_relevant,
                 }
                 for a in articles
             ]
@@ -217,7 +218,7 @@ def get_news(
             for article in [bucket[i]]
         ]
 
-    normalized = [_normalize_article(a) for a in raw_articles]
+    normalized = [_normalize_article(a) for a in raw_articles if a.get("is_relevant", True)]
     if MAX_TOTAL_NEWS > 0:
         normalized = normalized[:MAX_TOTAL_NEWS]
     total = len(normalized)
@@ -250,7 +251,7 @@ def get_news_detail(article_id: str):
 
     for name in SOURCES:
         for raw in cache_client.get_news(name):
-            if _make_id(raw.get("url", "")) == article_id:
+            if _make_id(raw.get("url", "")) == article_id and raw.get("is_relevant", True):
                 article = _normalize_article(raw)
                 took_ms = int((time.monotonic() - t0) * 1000)
                 return NewsDetailResponse(

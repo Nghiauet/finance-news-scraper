@@ -68,6 +68,7 @@ def set_article(
     tickers: list | None = None,
     thumbnail: dict | None = None,
     content: str | None = None,
+    is_relevant: bool = True,
 ) -> None:
     r = _get_client()
     if r is None:
@@ -81,6 +82,7 @@ def set_article(
                 "tickers": tickers or [],
                 "thumbnail": thumbnail,
                 "content": content,
+                "is_relevant": is_relevant,
             },
             ensure_ascii=False,
         )

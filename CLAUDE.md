@@ -85,7 +85,7 @@ No per-source parsing logic or regex. The LLM handles all article parsing and su
 
 | Source | Notes |
 |---|---|
-| cafef, vnexpress, tinnhanhchungkhoan, vietnambiz, vietstock, dantri, tuoitre, thanhnien | Working |
+| cafef, vnexpress, tinnhanhchungkhoan, vietnambiz, vietstock, dantri, thanhnien | Working |
 | ndh | Broken root cert — `weak_ssl=True` required |
 | baodautu | JS-rendered body — links found but content may be empty |
 

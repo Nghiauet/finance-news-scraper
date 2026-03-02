@@ -3,6 +3,7 @@ import logging
 import os
 import threading
 import time
+from datetime import date
 from typing import Optional
 
 from openai import OpenAI
@@ -38,16 +39,17 @@ Viết lại tiêu đề bài báo bằng tiếng Việt sao cho:
 - Nếu chỉ có ngày mà không có giờ, dùng T00:00:00+07:00.
 - Nếu hoàn toàn không tìm thấy ngày tháng → null.
 
-## 3. summary (tóm tắt ngắn — hiển thị trên danh sách tin)
-Viết tóm tắt CỰC NGẮN, 1-2 câu, tối đa 200 ký tự. Đây là dòng mô tả hiển thị trong danh sách tin tức, người đọc dùng để quyết định có bấm vào đọc tiếp không.
-- Nêu điểm chính nhất của bài: sự kiện gì, con số nổi bật nhất.
-- Viết như một dòng sapo/lead của bài báo.
-- KHÔNG liệt kê, KHÔNG dùng markdown, KHÔNG dùng emojis.
+## 3. summary (tóm tắt — hiển thị trên danh sách tin)
+Viết tóm tắt bài báo, đảm bảo đầy đủ các thông tin quan trọng. Đây là đoạn mô tả hiển thị trong danh sách tin tức, giúp người đọc nắm được nội dung chính mà không cần bấm vào đọc bài.
+- Nêu đầy đủ: sự kiện gì, ai liên quan, các con số quan trọng (giá, %, giá trị giao dịch, lợi nhuận...).
+- Nếu bài có nhiều ý chính, tóm tắt tất cả — không chỉ nêu một ý.
+- Viết thành đoạn văn mạch lạc, 2-4 câu tùy độ phức tạp của bài.
+- KHÔNG dùng markdown, KHÔNG dùng emojis, KHÔNG dùng bullet points.
 
 Ví dụ summary tốt:
-- "VN-Index tăng 12,3 điểm lên 1.284,5 điểm nhờ nhóm ngân hàng dẫn dắt, thanh khoản HOSE đạt 18.456 tỷ đồng."
-- "Hòa Phát báo lãi quý III đạt 3.021 tỷ đồng, tăng 56% so với cùng kỳ nhờ sản lượng thép xây dựng tăng mạnh."
-- "NHNN giữ nguyên lãi suất điều hành, tín hiệu tiếp tục nới lỏng tiền tệ hỗ trợ tăng trưởng kinh tế."
+- "VN-Index tăng 12,3 điểm lên 1.284,5 điểm nhờ nhóm ngân hàng dẫn dắt, thanh khoản HOSE đạt 18.456 tỷ đồng. Khối ngoại mua ròng 345 tỷ đồng sau 5 phiên bán ròng liên tiếp, tập trung vào VNM và HPG."
+- "Hòa Phát báo lãi quý III đạt 3.021 tỷ đồng, tăng 56% so với cùng kỳ nhờ sản lượng thép xây dựng tăng mạnh. Doanh thu đạt 33.000 tỷ đồng, biên lợi nhuận gộp cải thiện lên 18,2%."
+- "NHNN giữ nguyên lãi suất điều hành, tín hiệu tiếp tục nới lỏng tiền tệ hỗ trợ tăng trưởng kinh tế. Lãi suất liên ngân hàng qua đêm giảm về 2,1%, tạo điều kiện cho tín dụng mở rộng trong quý II."
 
 ## 4. content (nội dung chi tiết — hiển thị khi đọc bài)
 Đây là trường quan trọng nhất. Viết lại toàn bộ nội dung bài báo bằng tiếng Việt. KHÔNG rút gọn, KHÔNG giới hạn độ dài. Đây là nội dung chính mà người đọc sẽ đọc khi bấm vào bài — phải đầy đủ và dễ đọc.
@@ -104,7 +106,13 @@ Dòng vốn ngoại quay trở lại mua ròng **345 tỷ đồng** sau 5 phiên
 - KHÔNG đoán mã không liên quan. KHÔNG thêm mã chỉ vì ngành được nhắc đến.
 - Trả về [] nếu không có mã cổ phiếu nào.
 
+## 6. is_relevant (liên quan tài chính/đầu tư)
+- true nếu bài báo liên quan đến tài chính, chứng khoán, đầu tư, ngân hàng, kinh tế vĩ mô, doanh nghiệp niêm yết, bất động sản đầu tư, hoặc thị trường tài chính.
+- false nếu bài báo KHÔNG liên quan đến tài chính/đầu tư — ví dụ: tin xã hội, giải trí, thể thao, đời sống, pháp luật hình sự, tai nạn, thời tiết, sức khỏe, du lịch, ẩm thực.
+- Khi nghi ngờ, ưu tiên true.
+
 # LƯU Ý QUAN TRỌNG
+- Hôm nay là {today}. Dùng thông tin này để giải quyết các tham chiếu thời gian tương đối như "hôm nay", "hôm qua", "tuần trước", v.v.
 - Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm thông tin từ kiến thức bên ngoài.
 - Nếu nội dung bài không phải tin tài chính (ví dụ: quảng cáo, bài PR), vẫn xử lý trung thực nội dung.
 - Nếu nội dung bị cắt ngắn hoặc không đầy đủ, xử lý phần có sẵn và không đề cập đến việc bị cắt."""
@@ -116,6 +124,7 @@ class ArticleExtraction(BaseModel):
     summary: str
     content: str
     tickers: list[str]
+    is_relevant: bool
 
 
 def _get_client() -> tuple[OpenAI, str]:
@@ -153,7 +162,7 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                 resp = client.beta.chat.completions.parse(
                     model=model,
                     messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT},
+                        {"role": "system", "content": _SYSTEM_PROMPT.format(today=date.today().isoformat())},
                         {"role": "user", "content": truncated},
                     ],
                     response_format=ArticleExtraction,

@@ -33,6 +33,7 @@ class Article:
     tickers: list = field(default_factory=list)
     thumbnail: Optional[dict] = None
     content: Optional[str] = None
+    is_relevant: bool = True
 
 
 HEADERS = {
@@ -122,7 +123,6 @@ SOURCES = {
     "vietnambiz": {"url": "https://vietnambiz.vn/tai-chinh.htm", "domain": "vietnambiz.vn"},
     "vietstock": {"url": "https://vietstock.vn/chung-khoan.htm", "domain": "vietstock.vn"},
     "dantri": {"url": "https://dantri.com.vn/kinh-doanh.htm", "domain": "dantri.com.vn"},
-    "tuoitre": {"url": "https://tuoitre.vn/kinh-te.htm", "domain": "tuoitre.vn"},
     "thanhnien": {"url": "https://thanhnien.vn/kinh-te.htm", "domain": "thanhnien.vn"},
 }
 
@@ -156,6 +156,7 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 tickers=cached.get("tickers", []),
                 thumbnail=cached.get("thumbnail"),
                 content=cached.get("content"),
+                is_relevant=cached.get("is_relevant", True),
             )
             results.append(article)
             continue
@@ -176,10 +177,12 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 tickers=parsed.get("tickers", []),
                 thumbnail=thumbnail,
                 content=parsed.get("content"),
+                is_relevant=parsed.get("is_relevant", True),
             )
             cache_client.set_article(
                 url, article.title, article.published_at, article.summary,
                 article.tickers, article.thumbnail, article.content,
+                article.is_relevant,
             )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
@@ -200,6 +203,7 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 "tickers": a.tickers,
                 "thumbnail": a.thumbnail,
                 "content": a.content,
+                "is_relevant": a.is_relevant,
             }
             for a in results
         ]
