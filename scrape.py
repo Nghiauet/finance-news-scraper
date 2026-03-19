@@ -4,6 +4,7 @@
 import argparse
 import json
 import logging
+import os
 import ssl
 import time
 from dataclasses import dataclass, field, asdict
@@ -63,14 +64,15 @@ def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
         return None
 
 
-def get_article_links(url: str, domain: str, weak_ssl: bool = False) -> list[dict]:
+def get_article_links(url: str, domain: str, weak_ssl: bool = False,
+                       selectors: str = "h2 a, h3 a, h4 a") -> list[dict]:
     """Generic link extraction from a category page."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
         return []
 
     articles = []
-    for a in soup.select("h2 a, h3 a"):
+    for a in soup.select(selectors):
         href = a.get("href", "")
         title = a.get_text(strip=True)
         if not href or not title or len(title) < 15:
@@ -102,6 +104,17 @@ def _extract_thumbnail(soup: BeautifulSoup) -> Optional[dict]:
     return thumb
 
 
+def _extract_next_data(soup: BeautifulSoup) -> Optional[dict]:
+    """Extract __NEXT_DATA__ JSON from a Next.js page."""
+    script = soup.find("script", id="__NEXT_DATA__")
+    if script and script.string:
+        try:
+            return json.loads(script.string)
+        except (json.JSONDecodeError, TypeError):
+            return None
+    return None
+
+
 def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
     """Fetch a page and return (visible_text, thumbnail_dict)."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
@@ -114,16 +127,56 @@ def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Opti
     return "\n".join(lines), thumbnail
 
 
+def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
+    """Extract article text from a Next.js page's __NEXT_DATA__ JSON."""
+    soup = fetch_html(url, weak_ssl=weak_ssl)
+    if not soup:
+        return None, None
+
+    thumbnail = _extract_thumbnail(soup)
+    data = _extract_next_data(soup)
+    if data:
+        try:
+            posts = data["props"]["pageProps"]["initialState"]["posts"]["posts"]["DETAIL"]["posts"]
+            if posts:
+                article = posts[0]
+                content_html = article.get("content", "")
+                if content_html:
+                    content_soup = BeautifulSoup(content_html, "lxml")
+                    lines = [l for l in content_soup.get_text(separator="\n", strip=True).splitlines() if l.strip()]
+                    text = "\n".join(lines)
+                    if not thumbnail and article.get("images"):
+                        for img in article["images"]:
+                            if img.get("imageUrl"):
+                                thumbnail = {"url": img["imageUrl"]}
+                                break
+                    return text, thumbnail
+        except (KeyError, IndexError, TypeError):
+            log.warning("Failed to parse __NEXT_DATA__ for %s", url)
+
+    # Fallback to regular extraction
+    return get_page_data(url, weak_ssl=weak_ssl)
+
+
 SOURCES = {
     "cafef": {"url": "https://cafef.vn/thi-truong-chung-khoan.chn", "domain": "cafef.vn"},
     "vnexpress": {"url": "https://vnexpress.net/kinh-doanh", "domain": "vnexpress.net"},
     "tinnhanhchungkhoan": {"url": "https://tinnhanhchungkhoan.vn/chung-khoan/", "domain": "tinnhanhchungkhoan.vn"},
-    "ndh": {"url": "https://ndh.vn/chung-khoan.htm", "domain": "ndh.vn", "weak_ssl": True},
-    "baodautu": {"url": "https://baodautu.vn/chung-khoan-d1.html", "domain": "baodautu.vn"},
     "vietnambiz": {"url": "https://vietnambiz.vn/tai-chinh.htm", "domain": "vietnambiz.vn"},
     "vietstock": {"url": "https://vietstock.vn/chung-khoan.htm", "domain": "vietstock.vn"},
     "dantri": {"url": "https://dantri.com.vn/kinh-doanh.htm", "domain": "dantri.com.vn"},
     "thanhnien": {"url": "https://thanhnien.vn/kinh-te.htm", "domain": "thanhnien.vn"},
+    "vneconomy": {"url": "https://vneconomy.vn/chung-khoan.htm", "domain": "vneconomy.vn"},
+    "kinhtechungkhoan": {"url": "https://kinhtechungkhoan.vn/", "domain": "kinhtechungkhoan.vn"},
+    "thoibaonganhang": {"url": "https://thoibaonganhang.vn/thi-truong-chung-khoan-24.html", "domain": "thoibaonganhang.vn"},
+    "cafebiz": {"url": "https://cafebiz.vn/", "domain": "cafebiz.vn"},
+    "nguoiquansat": {"url": "https://nguoiquansat.vn/chung-khoan/", "domain": "nguoiquansat.vn"},
+    "stockbiz": {
+        "url": "https://stockbiz.vn/thi-truong",
+        "domain": "stockbiz.vn",
+        "selectors": 'a[href^="/tin-tuc/"]',
+        "nextjs": True,
+    },
 }
 
 
@@ -135,7 +188,10 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
     t_source = time.monotonic()
     log.info("[%s] scraping started", source_name)
 
-    articles_meta = get_article_links(source["url"], domain, weak_ssl=weak_ssl)
+    selectors = source.get("selectors", "h2 a, h3 a, h4 a")
+    is_nextjs = source.get("nextjs", False)
+
+    articles_meta = get_article_links(source["url"], domain, weak_ssl=weak_ssl, selectors=selectors)
     log.info("[%s] found %d links, processing first %d", source_name, len(articles_meta), limit)
 
     results = []
@@ -161,7 +217,10 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
             results.append(article)
             continue
 
-        page_text, thumbnail = get_page_data(url, weak_ssl=weak_ssl)
+        if is_nextjs:
+            page_text, thumbnail = get_page_data_nextjs(url, weak_ssl=weak_ssl)
+        else:
+            page_text, thumbnail = get_page_data(url, weak_ssl=weak_ssl)
         if not page_text:
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
@@ -219,6 +278,9 @@ if __name__ == "__main__":
     parser.add_argument("--test", action="store_true", help="Test mode: first source, 3 articles")
     args = parser.parse_args()
 
+    articles_per_source = int(os.environ.get("ARTICLES_PER_SOURCE", 30))
+    max_total = int(os.environ.get("MAX_TOTAL_NEWS", 0))
+
     all_articles: list[Article] = []
 
     if args.test:
@@ -227,7 +289,10 @@ if __name__ == "__main__":
         all_articles.extend(scrape_source(first_source, limit=3))
     else:
         for source_name in SOURCES:
-            all_articles.extend(scrape_source(source_name, limit=2))
+            all_articles.extend(scrape_source(source_name, limit=articles_per_source))
+            if max_total and len(all_articles) >= max_total:
+                log.info("Reached MAX_TOTAL_NEWS=%d, stopping", max_total)
+                break
 
     log.info("TOTAL: %d articles scraped", len(all_articles))
 

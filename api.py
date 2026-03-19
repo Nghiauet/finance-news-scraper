@@ -31,8 +31,8 @@ from scrape import SOURCES, scrape_source  # noqa: E402
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-ARTICLES_PER_SOURCE = int(os.environ.get("ARTICLES_PER_SOURCE", 10))
-MAX_TOTAL_NEWS = int(os.environ.get("MAX_TOTAL_NEWS", 200))
+ARTICLES_PER_SOURCE = int(os.environ.get("ARTICLES_PER_SOURCE", 30))
+MAX_TOTAL_NEWS = int(os.environ.get("MAX_TOTAL_NEWS", 600))
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ async def _refresh_all():
 async def _refresh_loop():
     while True:
         await _refresh_all()
-        await asyncio.sleep(3600)
+        await asyncio.sleep(1800)
 
 
 @asynccontextmanager

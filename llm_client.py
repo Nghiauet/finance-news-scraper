@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 import threading
 import time
 from datetime import date
@@ -127,6 +128,18 @@ class ArticleExtraction(BaseModel):
     is_relevant: bool
 
 
+def _sanitize_and_parse_json(raw: str) -> dict:
+    """Strip markdown code fences, control characters, and parse JSON from LLM output."""
+    # Remove ```json ... ``` wrapper
+    raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
+    raw = re.sub(r'\n?```\s*$', '', raw.strip())
+    # Remove control characters except tab, newline, carriage return
+    raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw)
+    # Use json.loads (lenient with escaped newlines in strings) then validate
+    data = json.loads(raw)
+    return ArticleExtraction.model_validate(data)
+
+
 def _get_client() -> tuple[OpenAI, str]:
     global _client, _MODEL
     if _client is None:
@@ -159,13 +172,13 @@ def extract_and_summarize(text: str) -> Optional[dict]:
         for attempt in range(2):
             try:
                 t0 = time.monotonic()
-                resp = client.beta.chat.completions.parse(
+                resp = client.chat.completions.create(
                     model=model,
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT.format(today=date.today().isoformat())},
                         {"role": "user", "content": truncated},
                     ],
-                    response_format=ArticleExtraction,
+                    response_format={"type": "json_object"},
                     temperature=0.7,
                 )
                 elapsed = time.monotonic() - t0
@@ -173,7 +186,8 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                 finish_reason = choice.finish_reason
                 if finish_reason == "length":
                     log.warning("LLM output truncated (finish_reason=length)")
-                extraction = choice.message.parsed
+                raw = choice.message.content
+                extraction = _sanitize_and_parse_json(raw)
                 result = extraction.model_dump()
                 cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
                 log.info("LLM OK (%.1fs, finish_reason=%s)", elapsed, finish_reason)
