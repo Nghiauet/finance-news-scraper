@@ -149,6 +149,24 @@ export function useTestModel() {
   })
 }
 
+// ---------- Monitoring hooks ----------
+
+export function useAdminCron() {
+  return useQuery({
+    queryKey: ["admin", "cron"],
+    queryFn: () => apiFetch<any>("/admin/cron"),
+    refetchInterval: 30000,
+  })
+}
+
+export function useAdminErrors(hours = 24) {
+  return useQuery({
+    queryKey: ["admin", "errors", hours],
+    queryFn: () => apiFetch<any>(`/admin/errors?hours=${hours}`),
+    refetchInterval: 30000,
+  })
+}
+
 // ---------- Preview hooks ----------
 
 export function usePreviewScrape() {

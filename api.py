@@ -125,15 +125,20 @@ async def _refresh_all():
     sources = list(SOURCES)
     total = len(sources)
     t_all = time.monotonic()
+    started_at = time.time()
     refresh_timeout = settings_mod.get_setting("refresh_timeout")
     articles_per = settings_mod.get_setting("articles_per_source")
     log.info("[CRON] refresh started — %d sources, timeout %ds", total, refresh_timeout)
     ok = 0
+    articles_total = 0
+    timed_out = False
     for idx, source_name in enumerate(sources, 1):
         elapsed = time.monotonic() - t_all
         if elapsed >= refresh_timeout:
             log.warning("[CRON] timeout reached (%.0fs >= %ds) — stopping after %d/%d sources",
                         elapsed, refresh_timeout, idx - 1, total)
+            timed_out = True
+            cache_client.record_error("cron", f"Global timeout after {idx - 1}/{total} sources")
             break
         t_src = time.monotonic()
         log.info("[CRON] [%d/%d] %s — starting", idx, total, source_name)
@@ -160,13 +165,18 @@ async def _refresh_all():
             ]
             cache_client.set_news(source_name, payload)
             ok += 1
+            articles_total += len(payload)
             log.info("[CRON] [%d/%d] %s — stored %d articles in %.1fs",
                      idx, total, source_name, len(payload), time.monotonic() - t_src)
         except asyncio.TimeoutError:
             log.warning("[CRON] [%d/%d] %s — timed out (refresh timeout reached)", idx, total, source_name)
+            cache_client.record_error("cron", f"Source timeout: {source_name}", source=source_name)
         except Exception as e:
             log.error("[CRON] [%d/%d] %s — failed: %s", idx, total, source_name, e)
-    log.info("[CRON] refresh done — %d/%d sources ok in %.1fs", ok, total, time.monotonic() - t_all)
+            cache_client.record_error("scrape", str(e), source=source_name)
+    duration = time.monotonic() - t_all
+    cache_client.record_cron_run(started_at, duration, total, ok, articles_total, timed_out)
+    log.info("[CRON] refresh done — %d/%d sources ok in %.1fs", ok, total, duration)
 
 
 async def _refresh_loop():
@@ -427,6 +437,28 @@ def admin_cache(_user: str = Depends(require_admin)):
         "data": cache_client.get_cache_stats(),
         "meta": _admin_meta(t0),
     }
+
+
+# ---------------------------------------------------------------------------
+# Monitoring endpoints (auth required)
+# ---------------------------------------------------------------------------
+
+@app.get("/admin/cron")
+def admin_cron(_user: str = Depends(require_admin)):
+    t0 = time.monotonic()
+    runs = cache_client.get_cron_runs(limit=50)
+    return {"success": True, "data": {"runs": runs}, "meta": _admin_meta(t0)}
+
+
+@app.get("/admin/errors")
+def admin_errors(
+    hours: int = Query(default=24, ge=1, le=168, description="Hours of error history."),
+    _user: str = Depends(require_admin),
+):
+    t0 = time.monotonic()
+    since = int(time.time()) - (hours * 3600)
+    errors = cache_client.get_error_log(since=since, limit=500)
+    return {"success": True, "data": {"errors": errors, "hours": hours}, "meta": _admin_meta(t0)}
 
 
 # ---------------------------------------------------------------------------

@@ -166,6 +166,7 @@ def record_llm_call(prompt_tokens: int, completion_tokens: int, latency_ms: int,
             "completion_tokens": completion_tokens,
             "total_tokens": total,
             "latency_ms": latency_ms,
+            "model_id": model_id,
         })
         pipe = r.pipeline()
         # Global totals
@@ -335,6 +336,111 @@ def set_active_model(model_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Cron run tracking  (key: "cron:runs" list, bounded to 100)
+# ---------------------------------------------------------------------------
+
+_CRON_RUNS_MAX = 100
+
+
+def record_cron_run(
+    started_at: float,
+    duration_s: float,
+    sources_total: int,
+    sources_ok: int,
+    articles_total: int,
+    timed_out: bool = False,
+) -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        record = json.dumps({
+            "started_at": int(started_at),
+            "duration_s": round(duration_s, 1),
+            "sources_total": sources_total,
+            "sources_ok": sources_ok,
+            "sources_failed": sources_total - sources_ok,
+            "articles_total": articles_total,
+            "timed_out": timed_out,
+        })
+        pipe = r.pipeline()
+        pipe.lpush("cron:runs", record)
+        pipe.ltrim("cron:runs", 0, _CRON_RUNS_MAX - 1)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def get_cron_runs(limit: int = 50) -> list[dict]:
+    r = _get_client()
+    if r is None:
+        return []
+    try:
+        raw = r.lrange("cron:runs", 0, limit - 1)
+        return [json.loads(rec) for rec in (raw or [])]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Error event log  (key: "errors:log" sorted set, score = timestamp)
+# ---------------------------------------------------------------------------
+
+_ERRORS_MAX = 1000
+_ERRORS_TTL_S = 7 * 86400  # 7 days
+
+
+def record_error(
+    category: str,
+    message: str,
+    source: str = "",
+    model_id: str = "",
+) -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        now = time.time()
+        record = json.dumps({
+            "ts": int(now),
+            "category": category,
+            "message": message[:500],
+            "source": source,
+            "model_id": model_id,
+        })
+        # Append a nonce to handle duplicate messages at the same second
+        member = f"{record}|{now:.6f}"
+        pipe = r.pipeline()
+        pipe.zadd("errors:log", {member: now})
+        pipe.zremrangebyscore("errors:log", "-inf", now - _ERRORS_TTL_S)
+        pipe.zremrangebyrank("errors:log", 0, -(_ERRORS_MAX + 1))
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def get_error_log(since: int = 0, limit: int = 200) -> list[dict]:
+    r = _get_client()
+    if r is None:
+        return []
+    try:
+        raw = r.zrangebyscore("errors:log", since or "-inf", "+inf", withscores=False)
+        results = []
+        for member in (raw or []):
+            # Strip the nonce suffix we appended
+            json_part = member.rsplit("|", 1)[0]
+            try:
+                results.append(json.loads(json_part))
+            except (json.JSONDecodeError, TypeError):
+                continue
+        # Return newest first, capped at limit
+        results.reverse()
+        return results[:limit]
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------

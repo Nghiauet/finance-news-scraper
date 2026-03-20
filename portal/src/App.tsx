@@ -8,7 +8,6 @@ import ArticlePage from "./pages/ArticlePage"
 import LlmPage from "./pages/LlmPage"
 import CachePage from "./pages/CachePage"
 import SettingsPage from "./pages/SettingsPage"
-import PreviewPage from "./pages/PreviewPage"
 
 export default function App() {
   return (
@@ -22,7 +21,6 @@ export default function App() {
           <Route path="llm" element={<LlmPage />} />
           <Route path="cache" element={<CachePage />} />
           <Route path="settings" element={<SettingsPage />} />
-          <Route path="preview" element={<PreviewPage />} />
         </Route>
       </Route>
     </Routes>

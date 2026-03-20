@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from "react-router-dom"
-import { LayoutDashboard, Newspaper, Cpu, Database, Settings, Eye, LogOut } from "lucide-react"
+import { LayoutDashboard, Newspaper, Cpu, Database, Settings, LogOut } from "lucide-react"
 import { logout } from "@/api/auth"
 
 const NAV = [
@@ -8,7 +8,6 @@ const NAV = [
   { to: "/llm", icon: Cpu, label: "LLM Usage" },
   { to: "/cache", icon: Database, label: "Cache" },
   { to: "/settings", icon: Settings, label: "Settings" },
-  { to: "/preview", icon: Eye, label: "Preview" },
 ]
 
 export default function Layout() {

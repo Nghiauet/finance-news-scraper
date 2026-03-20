@@ -194,6 +194,7 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                 return result
             except Exception as e:
                 cache_client.record_llm_error(model_id=config.id)
+                cache_client.record_error("llm", str(e), model_id=config.id)
                 log.warning("LLM attempt %d failed: %s", attempt + 1, e)
                 if attempt == 1:
                     break

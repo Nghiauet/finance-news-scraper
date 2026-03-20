@@ -62,6 +62,7 @@ def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
         return BeautifulSoup(resp.text, "lxml")
     except Exception as e:
         log.error("fetch failed %s: %s", url, e)
+        cache_client.record_error("scrape", str(e))
         return None
 
 
