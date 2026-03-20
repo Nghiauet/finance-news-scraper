@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react"
 import { Link } from "react-router-dom"
-import { Search, ArrowUpDown, X } from "lucide-react"
+import { Search, X } from "lucide-react"
 import { useNewsList, useAdminSources } from "@/api/hooks"
 
 export default function NewsPage() {
@@ -60,17 +60,15 @@ export default function NewsPage() {
           </div>
 
           {/* Sort */}
-          <button
-            onClick={() => {
-              setSort(sort === "newest" ? "oldest" : "newest")
-              setCursor(undefined)
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white hover:bg-gray-50"
-            title={`Currently: ${sort}`}
+          <select
+            value={sort}
+            onChange={(e) => { setSort(e.target.value); setCursor(undefined) }}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white"
           >
-            <ArrowUpDown size={14} />
-            {sort === "newest" ? "Newest" : "Oldest"}
-          </button>
+            <option value="newest">Newest published</option>
+            <option value="oldest">Oldest published</option>
+            <option value="recent">Recently scraped</option>
+          </select>
 
           {/* Source filter */}
           <select
@@ -100,9 +98,9 @@ export default function NewsPage() {
               Source: {source}
             </span>
           )}
-          {sort === "oldest" && (
+          {sort !== "newest" && (
             <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">
-              Oldest first
+              {sort === "oldest" ? "Oldest first" : "Recently scraped"}
             </span>
           )}
           <button onClick={resetFilters} className="text-gray-400 hover:text-gray-600 underline">

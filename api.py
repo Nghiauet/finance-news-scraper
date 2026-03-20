@@ -64,6 +64,7 @@ def _normalize_article(raw: dict) -> dict:
         "tickers": raw.get("tickers", []),
         "thumbnail": raw.get("thumbnail"),
         "content": raw.get("content"),
+        "scraped_at": raw.get("scraped_at"),
     }
 
 
@@ -88,6 +89,7 @@ class ArticleItem(BaseModel):
     tickers: list[str] = []
     thumbnail: Optional[Thumbnail] = None
     content: Optional[str] = None
+    scraped_at: Optional[str] = None
 
 
 class Pagination(BaseModel):
@@ -152,6 +154,7 @@ async def _refresh_all():
                     "thumbnail": a.thumbnail,
                     "content": a.content,
                     "is_relevant": a.is_relevant,
+                    "scraped_at": a.scraped_at,
                 }
                 for a in articles
             ]
@@ -226,7 +229,7 @@ def get_news(
     source: Optional[str] = Query(default=None, description="Filter by source name."),
     limit: int = Query(default=20, ge=1, le=100, description="Max items per page."),
     cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
-    sort: Optional[str] = Query(default="newest", description="Sort order: newest or oldest."),
+    sort: Optional[str] = Query(default="newest", description="Sort: newest, oldest, recent (by scrape time)."),
     q: Optional[str] = Query(default=None, description="Search query (title, summary, tickers)."),
 ):
     t0 = time.monotonic()
@@ -261,8 +264,10 @@ def get_news(
             or any(q_lower in t.lower() for t in a.get("tickers", []))
         ]
 
-    # Sort by published_at
-    if sort in ("newest", "oldest"):
+    # Sort
+    if sort == "recent":
+        normalized.sort(key=lambda a: a.get("scraped_at") or "", reverse=True)
+    elif sort in ("newest", "oldest"):
         normalized.sort(
             key=lambda a: a.get("published_at") or "",
             reverse=(sort == "newest"),

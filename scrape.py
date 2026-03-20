@@ -35,6 +35,7 @@ class Article:
     thumbnail: Optional[dict] = None
     content: Optional[str] = None
     is_relevant: bool = True
+    scraped_at: Optional[str] = None
 
 
 HEADERS = {
@@ -213,6 +214,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 thumbnail=cached.get("thumbnail"),
                 content=cached.get("content"),
                 is_relevant=cached.get("is_relevant", True),
+                scraped_at=cached.get("scraped_at"),
             )
             results.append(article)
             continue
@@ -225,6 +227,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
 
+        now = time.strftime("%Y-%m-%dT%H:%M:%S+07:00")
         parsed = extract_and_summarize(page_text)
         if parsed:
             article = Article(
@@ -237,6 +240,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 thumbnail=thumbnail,
                 content=parsed.get("content"),
                 is_relevant=parsed.get("is_relevant", True),
+                scraped_at=now,
             )
             if not dry_run:
                 cache_client.set_article(
@@ -264,6 +268,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 "thumbnail": a.thumbnail,
                 "content": a.content,
                 "is_relevant": a.is_relevant,
+                "scraped_at": a.scraped_at,
             }
             for a in results
         ]

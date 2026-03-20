@@ -84,6 +84,7 @@ def set_article(
                 "thumbnail": thumbnail,
                 "content": content,
                 "is_relevant": is_relevant,
+                "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
             },
             ensure_ascii=False,
         )
