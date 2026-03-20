@@ -1,0 +1,167 @@
+import { useState } from "react"
+import { Eye, RefreshCw, ChevronDown, ChevronRight, CheckCircle, XCircle } from "lucide-react"
+import { useAdminSources, usePreviewScrape, useRefreshSource } from "@/api/hooks"
+
+export default function PreviewPage() {
+  const { data: sourcesData } = useAdminSources()
+  const previewMut = usePreviewScrape()
+  const refreshMut = useRefreshSource()
+  const [source, setSource] = useState("")
+  const [limit, setLimit] = useState(5)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+
+  const sources: any[] = sourcesData?.data || []
+  const articles: any[] = previewMut.data?.data || []
+
+  function handlePreview() {
+    if (!source) return
+    previewMut.mutate({ source, limit })
+    setExpanded(new Set())
+  }
+
+  function handleRefresh() {
+    if (!source) return
+    if (!confirm(`Refresh "${source}"? This will scrape and write to cache.`)) return
+    refreshMut.mutate(source)
+  }
+
+  function toggleExpand(idx: number) {
+    const next = new Set(expanded)
+    if (next.has(idx)) next.delete(idx)
+    else next.add(idx)
+    setExpanded(next)
+  }
+
+  return (
+    <div className="space-y-6">
+      <h2 className="text-xl font-semibold text-gray-800">Preview</h2>
+
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="flex-1 min-w-[200px]">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Source</label>
+            <select
+              value={source}
+              onChange={(e) => setSource(e.target.value)}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Select a source...</option>
+              {sources.map((s: any) => (
+                <option key={s.name} value={s.name}>{s.name} ({s.domain})</option>
+              ))}
+            </select>
+          </div>
+          <div className="w-28">
+            <label className="block text-sm font-medium text-gray-700 mb-1">Limit</label>
+            <input
+              type="number"
+              min={1}
+              max={10}
+              value={limit}
+              onChange={(e) => setLimit(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handlePreview}
+              disabled={!source || previewMut.isPending}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Eye size={14} />
+              {previewMut.isPending ? "Scraping..." : "Preview"}
+            </button>
+            <button
+              onClick={handleRefresh}
+              disabled={!source || refreshMut.isPending}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw size={14} className={refreshMut.isPending ? "animate-spin" : ""} />
+              {refreshMut.isPending ? "Refreshing..." : "Refresh Source"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {previewMut.isError && (
+        <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200">
+          {(previewMut.error as Error).message}
+        </div>
+      )}
+
+      {refreshMut.isSuccess && (
+        <div className="bg-green-50 text-green-700 text-sm px-4 py-3 rounded-lg border border-green-200 flex items-center gap-2">
+          <CheckCircle size={16} />
+          Source refreshed successfully! {refreshMut.data?.data?.count ?? 0} articles cached.
+        </div>
+      )}
+
+      {articles.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          <div className="p-4 border-b border-gray-200">
+            <h3 className="text-sm font-semibold text-gray-700">
+              Preview Results ({articles.length} articles)
+            </h3>
+          </div>
+          <div className="divide-y divide-gray-100">
+            {articles.map((a: any, idx: number) => (
+              <div key={idx}>
+                <div
+                  onClick={() => toggleExpand(idx)}
+                  className="flex items-start gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50"
+                >
+                  <button className="mt-0.5 text-gray-400">
+                    {expanded.has(idx) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                  </button>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-gray-800 text-sm">{a.title || "(No title)"}</span>
+                      {a.is_relevant === false && (
+                        <span className="flex items-center gap-0.5 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">
+                          <XCircle size={12} /> Not relevant
+                        </span>
+                      )}
+                    </div>
+                    {a.summary && (
+                      <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{a.summary}</p>
+                    )}
+                    <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
+                      <span>{a.source}</span>
+                      {a.published_at && (
+                        <span>{new Date(a.published_at).toLocaleString("vi-VN")}</span>
+                      )}
+                      {(a.tickers || []).length > 0 && (
+                        <div className="flex gap-1">
+                          {a.tickers.map((t: string) => (
+                            <span key={t} className="bg-blue-50 text-blue-700 px-1 py-0.5 rounded text-xs font-medium">{t}</span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                {expanded.has(idx) && (
+                  <div className="px-4 pb-4 pl-11">
+                    <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-700 prose prose-sm max-w-none">
+                      <pre className="whitespace-pre-wrap font-sans text-sm">{a.content || "(No content)"}</pre>
+                    </div>
+                    {a.url && (
+                      <a
+                        href={a.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-block mt-2 text-xs text-blue-600 hover:underline"
+                      >
+                        View original article
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -41,11 +41,12 @@ Optional overrides:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ARTICLES_PER_SOURCE` | 10 | Max articles scraped per source |
-| `MAX_TOTAL_NEWS` | 200 (CLI: 0=unlimited) | Cap on total articles in API responses |
-| `CACHE_ARTICLE_TTL` | 18000 (5h) | Redis TTL for article cache (seconds) |
-| `CACHE_SUMMARY_TTL` | 18000 (5h) | Redis TTL for LLM result cache |
-| `CACHE_NEWS_TTL` | 7200 (2h) | Redis TTL for news list cache |
+| `ARTICLES_PER_SOURCE` | 23 (API) / 30 (CLI) | Max articles scraped per source |
+| `MAX_TOTAL_NEWS` | 300 (API) / 0 (CLI, unlimited) | Cap on total articles in API responses |
+| `REFRESH_TIMEOUT` | 1800 (30min) | Max seconds for a single refresh cycle |
+| `CACHE_ARTICLE_TTL` | 259200 (3d) | Redis TTL for article cache (seconds) |
+| `CACHE_SUMMARY_TTL` | 259200 (3d) | Redis TTL for LLM result cache |
+| `CACHE_NEWS_TTL` | 259200 (3d) | Redis TTL for news list cache |
 | `LLM_MAX_INPUT_CHARS` | 32000 | Max chars sent to LLM per article |
 | `LLM_CALL_DELAY` | 2 | Seconds to sleep between LLM calls (rate limiting) |
 
@@ -95,9 +96,9 @@ No per-source parsing logic. The LLM handles all extraction (title, date, summar
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant}` | 5h |
-| `summary:<sha256>` | LLM JSON result (keyed by sha256 of page text) | 5h |
-| `news:<source>` | Full article list JSON per source | 2h |
+| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant}` | 3d |
+| `summary:<sha256>` | LLM JSON result (keyed by sha256 of page text) | 3d |
+| `news:<source>` | Full article list JSON per source | 3d |
 
 ### Docker
 

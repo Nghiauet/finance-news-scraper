@@ -180,7 +180,7 @@ SOURCES = {
 }
 
 
-def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
+def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> list[Article]:
     source = SOURCES[source_name]
     domain = source["domain"]
     weak_ssl = source.get("weak_ssl", False)
@@ -238,11 +238,12 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
                 content=parsed.get("content"),
                 is_relevant=parsed.get("is_relevant", True),
             )
-            cache_client.set_article(
-                url, article.title, article.published_at, article.summary,
-                article.tickers, article.thumbnail, article.content,
-                article.is_relevant,
-            )
+            if not dry_run:
+                cache_client.set_article(
+                    url, article.title, article.published_at, article.summary,
+                    article.tickers, article.thumbnail, article.content,
+                    article.is_relevant,
+                )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
         else:
@@ -251,7 +252,7 @@ def scrape_source(source_name: str, limit: int = 3) -> list[Article]:
 
     log.info("[%s] finished: %d/%d articles in %.1fs", source_name, len(results), limit, time.monotonic() - t_source)
 
-    if results:
+    if results and not dry_run:
         payload = [
             {
                 "title": a.title,

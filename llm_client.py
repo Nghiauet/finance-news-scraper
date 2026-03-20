@@ -4,6 +4,7 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
@@ -14,109 +15,36 @@ import cache_client
 
 log = logging.getLogger(__name__)
 
-_client: Optional[OpenAI] = None
-_MODEL: Optional[str] = None
-_MAX_INPUT_CHARS: int = int(os.environ.get("LLM_MAX_INPUT_CHARS", 32000))
-_CALL_DELAY: float = float(os.environ.get("LLM_CALL_DELAY", 2))
 _call_lock = threading.Lock()
 
-_SYSTEM_PROMPT = """Bạn là một nhà phân tích tin tức tài chính Việt Nam chuyên nghiệp. Nhiệm vụ của bạn là đọc bài báo và tạo ra nội dung có cấu trúc chất lượng cao cho ứng dụng đọc tin tài chính.
+_SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON với 6 trường sau.
 
-# NHIỆM VỤ
+Hôm nay là {today}. Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm từ kiến thức bên ngoài.
 
-Phân tích bài báo được cung cấp và trả về JSON với các trường sau:
+## 1. title
+Viết lại tiêu đề rõ ràng, súc tích, dưới 100 ký tự. Nêu bật: ai, cái gì, con số quan trọng nhất. Không sao chép nguyên tiêu đề gốc.
 
-## 1. title (tiêu đề — viết lại)
-Viết lại tiêu đề bài báo bằng tiếng Việt sao cho:
-- Rõ ràng, súc tích, dễ hiểu ngay khi đọc lướt.
-- Nêu bật thông tin quan trọng nhất: ai, cái gì, con số nổi bật nhất.
-- Giữ dưới 100 ký tự. Không dùng dấu ngoặc kép, không viết hoa toàn bộ.
-- Nếu có con số ấn tượng, đưa vào tiêu đề (ví dụ: "VN-Index tăng 12 điểm, thanh khoản vượt 18.000 tỷ").
-- Không sao chép nguyên tiêu đề gốc — hãy viết lại cho tốt hơn, chính xác hơn.
+## 2. published_at
+ISO 8601 với múi giờ +07:00. Nếu chỉ có ngày → T00:00:00+07:00. Không tìm thấy → null.
 
-## 2. published_at (thời gian đăng)
-- Định dạng ISO 8601 với múi giờ Việt Nam: YYYY-MM-DDTHH:MM:SS+07:00
-- Tìm trong các vị trí: đầu bài, cuối bài, metadata, dòng "Ngày đăng", "Cập nhật", timestamp.
-- Nếu chỉ có ngày mà không có giờ, dùng T00:00:00+07:00.
-- Nếu hoàn toàn không tìm thấy ngày tháng → null.
+## 3. summary
+Tóm tắt ngắn gọn 1-2 câu, chỉ giữ lại thông tin quan trọng nhất: sự kiện chính, con số nổi bật (giá, %, giá trị giao dịch). Viết dạng văn xuôi, KHÔNG dùng markdown/emojis/bullet points. Người đọc phải hiểu ngay nội dung mà không cần đọc bài.
 
-## 3. summary (tóm tắt — hiển thị trên danh sách tin)
-Viết tóm tắt bài báo, đảm bảo đầy đủ các thông tin quan trọng. Đây là đoạn mô tả hiển thị trong danh sách tin tức, giúp người đọc nắm được nội dung chính mà không cần bấm vào đọc bài.
-- Nêu đầy đủ: sự kiện gì, ai liên quan, các con số quan trọng (giá, %, giá trị giao dịch, lợi nhuận...).
-- Nếu bài có nhiều ý chính, tóm tắt tất cả — không chỉ nêu một ý.
-- Viết thành đoạn văn mạch lạc, 2-4 câu tùy độ phức tạp của bài.
-- KHÔNG dùng markdown, KHÔNG dùng emojis, KHÔNG dùng bullet points.
+## 4. content
+Tóm tắt nội dung bài báo dạng markdown, tập trung vào thông tin có giá trị cho nhà đầu tư:
+- Sự kiện chính và con số cụ thể (giữ nguyên số liệu, không làm tròn)
+- Nguyên nhân/bối cảnh (nếu có)
+- Nhận định chuyên gia (nếu có, dùng > blockquote)
+- Dùng **in đậm** cho con số và mã cổ phiếu quan trọng
+- Dùng bảng markdown nếu có nhiều số liệu so sánh
+- Bỏ qua thông tin không có giá trị: quảng cáo, lời dẫn dắt rườm rà, nội dung lặp lại
+- Viết ngắn gọn, đi thẳng vào trọng tâm. Độ dài tỷ lệ với lượng thông tin có giá trị trong bài.
 
-Ví dụ summary tốt:
-- "VN-Index tăng 12,3 điểm lên 1.284,5 điểm nhờ nhóm ngân hàng dẫn dắt, thanh khoản HOSE đạt 18.456 tỷ đồng. Khối ngoại mua ròng 345 tỷ đồng sau 5 phiên bán ròng liên tiếp, tập trung vào VNM và HPG."
-- "Hòa Phát báo lãi quý III đạt 3.021 tỷ đồng, tăng 56% so với cùng kỳ nhờ sản lượng thép xây dựng tăng mạnh. Doanh thu đạt 33.000 tỷ đồng, biên lợi nhuận gộp cải thiện lên 18,2%."
-- "NHNN giữ nguyên lãi suất điều hành, tín hiệu tiếp tục nới lỏng tiền tệ hỗ trợ tăng trưởng kinh tế. Lãi suất liên ngân hàng qua đêm giảm về 2,1%, tạo điều kiện cho tín dụng mở rộng trong quý II."
+## 5. tickers
+Mã cổ phiếu Việt Nam (2-5 ký tự IN HOA) được nhắc trực tiếp hoặc suy ra rõ ràng (ví dụ: "Vinamilk" → VNM). Trả về [] nếu không có.
 
-## 4. content (nội dung chi tiết — hiển thị khi đọc bài)
-Đây là trường quan trọng nhất. Viết lại toàn bộ nội dung bài báo bằng tiếng Việt. KHÔNG rút gọn, KHÔNG giới hạn độ dài. Đây là nội dung chính mà người đọc sẽ đọc khi bấm vào bài — phải đầy đủ và dễ đọc.
-
-### Định dạng nội dung:
-Sử dụng markdown để tạo cấu trúc rõ ràng, dễ đọc, dễ nắm bắt thông tin:
-
-- Chia nội dung thành các đoạn văn ngắn (3-5 câu mỗi đoạn), ngăn cách bằng dòng trống.
-- Dùng **in đậm** để nhấn mạnh con số quan trọng, tên công ty, mã cổ phiếu, và điểm mấu chốt.
-- Nếu bài có nhiều số liệu so sánh (ví dụ: kết quả kinh doanh nhiều quý, giá cổ phiếu nhiều mã), trình bày bằng bảng markdown:
-  | Chỉ tiêu | Q3/2024 | Q3/2023 | Thay đổi |
-  |---|---|---|---|
-  | Doanh thu | 15.234 tỷ | 12.100 tỷ | +25,9% |
-- Nếu bài liệt kê nhiều mục (ví dụ: danh sách cổ phiếu, chính sách mới), dùng bullet points.
-- Dùng > blockquote cho trích dẫn trực tiếp từ chuyên gia hoặc lãnh đạo.
-
-### Cấu trúc nội dung (viết theo thứ tự này):
-1. **Sự kiện chính**: Chuyện gì đã xảy ra? Khi nào? Ở đâu? Ai liên quan?
-2. **Số liệu cụ thể**: Tất cả con số quan trọng — giá cổ phiếu, biên độ tăng/giảm (%), khối lượng giao dịch, giá trị (tỷ VND, triệu USD), chỉ số (VN-Index, HNX-Index), lãi suất, tỷ giá, doanh thu, lợi nhuận, vốn hóa. Trình bày bằng bảng nếu có nhiều số liệu.
-3. **Nguyên nhân/bối cảnh**: Tại sao sự kiện này xảy ra? Bối cảnh thị trường, chính sách, kinh tế vĩ mô.
-4. **Tác động/phản ứng**: Thị trường phản ứng thế nào? Nhà đầu tư, doanh nghiệp, cơ quan quản lý phản ứng ra sao?
-5. **Nhận định/triển vọng**: Ý kiến chuyên gia, dự báo, khuyến nghị (nếu có trong bài).
-
-### Quy tắc chất lượng:
-- KHÔNG giới hạn độ dài — viết đầy đủ mọi thông tin từ bài gốc. Bài gốc dài bao nhiêu thì content cũng phải tương xứng.
-- KHÔNG bỏ sót bất kỳ con số cụ thể nào từ bài gốc — mỗi con số đều có giá trị.
-- KHÔNG làm tròn số. Nếu bài viết "1.234,56 tỷ đồng" thì giữ nguyên, không viết "khoảng 1.235 tỷ đồng".
-- Giữ nguyên tên riêng (công ty, người, tổ chức) chính xác như trong bài.
-- Giữ nguyên mã cổ phiếu khi xuất hiện trong ngữ cảnh (ví dụ: "cổ phiếu **VNM** giảm 2,3%").
-- Sử dụng thuật ngữ tài chính chính xác bằng tiếng Việt (ví dụ: "thanh khoản", "vốn hóa", "margin", "T+", "phiên ATC").
-- Đảm bảo tính mạch lạc: các đoạn liên kết logic, chuyển ý tự nhiên.
-- Nếu bài ngắn hoặc ít thông tin, viết tất cả những gì có — không thêm thắt, không suy diễn.
-
-### Ví dụ content tốt:
-
-VN-Index đóng cửa phiên 26/2 tại **1.284,5 điểm**, tăng **12,3 điểm** tương đương **0,97%** so với phiên trước. Thanh khoản trên HOSE đạt **18.456 tỷ đồng**, cao hơn 23% so với trung bình 20 phiên gần nhất.
-
-Nhóm cổ phiếu ngân hàng dẫn dắt đà tăng:
-
-| Mã | Giá đóng cửa | Thay đổi |
-|---|---|---|
-| **VCB** | 92.500 đồng/cp | +1,8% |
-| **TCB** | — | +2,1% |
-| **BID** | — | +1,5% |
-
-> Theo ông Nguyễn Văn A, Giám đốc phân tích CTCK XYZ: "Động lực tăng đến từ kỳ vọng NHNN tiếp tục giữ lãi suất điều hành ổn định trong quý II."
-
-Dòng vốn ngoại quay trở lại mua ròng **345 tỷ đồng** sau 5 phiên bán ròng liên tiếp. Khối ngoại tập trung mua **VNM** với giá trị **89 tỷ đồng** và **HPG** với **67 tỷ đồng**. Ông A nhận định VN-Index có thể hướng tới vùng kháng cự **1.300 điểm** trong tuần tới nếu thanh khoản duy trì trên 16.000 tỷ đồng/phiên.
-
-## 5. tickers (mã cổ phiếu)
-- Liệt kê tất cả mã cổ phiếu Việt Nam được nhắc đến trực tiếp trong bài.
-- Mã cổ phiếu là 2–5 ký tự IN HOA, giao dịch trên HOSE, HNX, hoặc UPCOM (ví dụ: VNM, HPG, VCB, SSI, FPT, MWG, TCB, VIC, VHM, MSN).
-- Chỉ bao gồm mã được nhắc đến rõ ràng hoặc có thể suy ra trực tiếp (ví dụ: "Vinamilk" → VNM, "Hòa Phát" → HPG, "Vietcombank" → VCB).
-- KHÔNG đoán mã không liên quan. KHÔNG thêm mã chỉ vì ngành được nhắc đến.
-- Trả về [] nếu không có mã cổ phiếu nào.
-
-## 6. is_relevant (liên quan tài chính/đầu tư)
-- true nếu bài báo liên quan đến tài chính, chứng khoán, đầu tư, ngân hàng, kinh tế vĩ mô, doanh nghiệp niêm yết, bất động sản đầu tư, hoặc thị trường tài chính.
-- false nếu bài báo KHÔNG liên quan đến tài chính/đầu tư — ví dụ: tin xã hội, giải trí, thể thao, đời sống, pháp luật hình sự, tai nạn, thời tiết, sức khỏe, du lịch, ẩm thực.
-- Khi nghi ngờ, ưu tiên true.
-
-# LƯU Ý QUAN TRỌNG
-- Hôm nay là {today}. Dùng thông tin này để giải quyết các tham chiếu thời gian tương đối như "hôm nay", "hôm qua", "tuần trước", v.v.
-- Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm thông tin từ kiến thức bên ngoài.
-- Nếu nội dung bài không phải tin tài chính (ví dụ: quảng cáo, bài PR), vẫn xử lý trung thực nội dung.
-- Nếu nội dung bị cắt ngắn hoặc không đầy đủ, xử lý phần có sẵn và không đề cập đến việc bị cắt."""
+## 6. is_relevant
+true nếu liên quan tài chính/đầu tư/chứng khoán/kinh tế. false nếu tin xã hội/giải trí/thể thao/đời sống. Nghi ngờ → true."""
 
 
 class ArticleExtraction(BaseModel):
@@ -128,34 +56,96 @@ class ArticleExtraction(BaseModel):
     is_relevant: bool
 
 
-def _sanitize_and_parse_json(raw: str) -> dict:
+@dataclass
+class ModelConfig:
+    id: str
+    name: str
+    base_url: str
+    api_key: str
+    model_name: str
+
+
+def _sanitize_and_parse_json(raw: str) -> ArticleExtraction:
     """Strip markdown code fences, control characters, and parse JSON from LLM output."""
-    # Remove ```json ... ``` wrapper
     raw = re.sub(r'^```(?:json)?\s*\n?', '', raw.strip())
     raw = re.sub(r'\n?```\s*$', '', raw.strip())
-    # Remove control characters except tab, newline, carriage return
     raw = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', raw)
-    # Use json.loads (lenient with escaped newlines in strings) then validate
     data = json.loads(raw)
     return ArticleExtraction.model_validate(data)
 
 
-def _get_client() -> tuple[OpenAI, str]:
-    global _client, _MODEL
-    if _client is None:
-        _client = OpenAI(
-            api_key=os.environ["LLM_API_KEY"],
-            base_url=os.environ["LLM_BASE_URL"],
-            timeout=300.0,
-        )
-        _MODEL = os.environ["LLM_MODEL"]
-        log.info("LLM client initialised — model=%s base_url=%s", _MODEL, os.environ["LLM_BASE_URL"])
-    return _client, _MODEL
+# ---------------------------------------------------------------------------
+# Multi-model client manager
+# ---------------------------------------------------------------------------
 
+class _ClientManager:
+    """Manages multiple OpenAI-compatible LLM clients with an active model concept."""
+
+    def __init__(self):
+        self._clients: dict[str, OpenAI] = {}
+        self._lock = threading.Lock()
+
+    def get_active_client(self) -> tuple[OpenAI, ModelConfig]:
+        """Return the active model's client and config.
+        Falls back to env vars if no model is configured in Redis."""
+        active_id = cache_client.get_active_model_id()
+        if active_id:
+            config_data = cache_client.get_model_config(active_id)
+            if config_data:
+                config = ModelConfig(
+                    id=active_id,
+                    name=config_data.get("name", ""),
+                    base_url=config_data["base_url"],
+                    api_key=config_data["api_key"],
+                    model_name=config_data["model_name"],
+                )
+                with self._lock:
+                    if active_id not in self._clients:
+                        self._clients[active_id] = OpenAI(
+                            api_key=config.api_key,
+                            base_url=config.base_url,
+                            timeout=300.0,
+                        )
+                        log.info("LLM client created for model %s (%s)", config.name, config.model_name)
+                return self._clients[active_id], config
+
+        # Fallback to env vars
+        env_key = os.environ.get("LLM_API_KEY", "")
+        env_url = os.environ.get("LLM_BASE_URL", "")
+        env_model = os.environ.get("LLM_MODEL", "")
+        if not env_key or not env_url or not env_model:
+            raise RuntimeError("No active model configured and LLM_API_KEY/LLM_BASE_URL/LLM_MODEL env vars are missing")
+        config = ModelConfig(id="_env", name="Default (env)", base_url=env_url, api_key=env_key, model_name=env_model)
+        with self._lock:
+            if "_env" not in self._clients:
+                self._clients["_env"] = OpenAI(api_key=env_key, base_url=env_url, timeout=300.0)
+                log.info("LLM client initialised from env — model=%s base_url=%s", env_model, env_url)
+        return self._clients["_env"], config
+
+    def invalidate(self):
+        """Drop all cached clients so they get recreated with fresh config."""
+        with self._lock:
+            self._clients.clear()
+            log.info("All LLM clients invalidated")
+
+
+_manager = _ClientManager()
+
+
+def invalidate_active_client():
+    """Called by API when model config changes."""
+    _manager.invalidate()
+
+
+# ---------------------------------------------------------------------------
+# Core LLM function
+# ---------------------------------------------------------------------------
 
 def extract_and_summarize(text: str) -> Optional[dict]:
     """Extract title, published_at, and summary from article text via LLM.
     Uses Redis cache. Returns dict or None on failure."""
+    import settings as settings_mod
+
     cached = cache_client.get_summary(text)
     if cached:
         log.debug("Summary cache hit")
@@ -164,22 +154,23 @@ def extract_and_summarize(text: str) -> Optional[dict]:
         except (json.JSONDecodeError, TypeError):
             return {"title": "", "published_at": None, "summary": cached, "content": cached}
 
-    # Truncate to avoid token limits
-    truncated = text[:_MAX_INPUT_CHARS] if len(text) > _MAX_INPUT_CHARS else text
+    max_input = settings_mod.get_setting("llm_max_input_chars")
+    call_delay = settings_mod.get_setting("llm_call_delay")
+    truncated = text[:max_input] if len(text) > max_input else text
 
-    client, model = _get_client()
+    client, config = _manager.get_active_client()
     with _call_lock:
         for attempt in range(2):
             try:
                 t0 = time.monotonic()
                 resp = client.chat.completions.create(
-                    model=model,
+                    model=config.model_name,
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT.format(today=date.today().isoformat())},
                         {"role": "user", "content": truncated},
                     ],
                     response_format={"type": "json_object"},
-                    temperature=0.7,
+                    temperature=0.3,
                 )
                 elapsed = time.monotonic() - t0
                 choice = resp.choices[0]
@@ -190,12 +181,65 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                 extraction = _sanitize_and_parse_json(raw)
                 result = extraction.model_dump()
                 cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
-                log.info("LLM OK (%.1fs, finish_reason=%s)", elapsed, finish_reason)
-                time.sleep(_CALL_DELAY)
+                usage = resp.usage
+                if usage:
+                    cache_client.record_llm_call(
+                        usage.prompt_tokens or 0,
+                        usage.completion_tokens or 0,
+                        int(elapsed * 1000),
+                        model_id=config.id,
+                    )
+                log.info("LLM OK (%.1fs, model=%s, finish_reason=%s)", elapsed, config.model_name, finish_reason)
+                time.sleep(call_delay)
                 return result
             except Exception as e:
+                cache_client.record_llm_error(model_id=config.id)
                 log.warning("LLM attempt %d failed: %s", attempt + 1, e)
                 if attempt == 1:
                     break
         log.error("LLM failed after 2 attempts — skipping article")
         return None
+
+
+def get_model_info() -> dict:
+    """Return current LLM configuration."""
+    import settings as settings_mod
+    max_input = settings_mod.get_setting("llm_max_input_chars")
+    try:
+        _client, config = _manager.get_active_client()
+        return {
+            "model": config.model_name,
+            "base_url": config.base_url,
+            "name": config.name,
+            "id": config.id,
+            "max_input_chars": max_input,
+        }
+    except Exception:
+        return {
+            "model": os.environ.get("LLM_MODEL", ""),
+            "base_url": os.environ.get("LLM_BASE_URL", ""),
+            "name": "Default (env)",
+            "id": "_env",
+            "max_input_chars": max_input,
+        }
+
+
+def test_model(config_data: dict) -> dict:
+    """Send a simple test prompt to verify a model works. Returns result dict."""
+    try:
+        client = OpenAI(
+            api_key=config_data["api_key"],
+            base_url=config_data["base_url"],
+            timeout=30.0,
+        )
+        t0 = time.monotonic()
+        resp = client.chat.completions.create(
+            model=config_data["model_name"],
+            messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            max_tokens=10,
+        )
+        elapsed = time.monotonic() - t0
+        content = resp.choices[0].message.content or ""
+        return {"ok": True, "response": content.strip(), "latency_ms": int(elapsed * 1000)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}

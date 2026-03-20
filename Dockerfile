@@ -1,3 +1,14 @@
+# Stage 1: Build frontend
+FROM node:20-alpine AS frontend-builder
+ARG VITE_BASE_PATH=/news-portal/
+ENV VITE_BASE_PATH=${VITE_BASE_PATH}
+WORKDIR /frontend
+COPY portal/package.json portal/package-lock.json ./
+RUN npm ci
+COPY portal/ ./
+RUN npm run build
+
+# Stage 2: Python API + built frontend
 FROM python:3.13-slim
 
 # Install uv
@@ -14,6 +25,9 @@ COPY . .
 
 # Install the project itself
 RUN uv sync --frozen --no-dev
+
+# Copy built frontend
+COPY --from=frontend-builder /frontend/dist portal_dist/
 
 EXPOSE 46401
 

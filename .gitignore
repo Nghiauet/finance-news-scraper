@@ -15,3 +15,8 @@ wheels/
 # Scraped output
 data/
 articles.json
+
+# Portal build
+portal/node_modules/
+portal/dist/
+portal_dist/

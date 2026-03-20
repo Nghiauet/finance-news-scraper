@@ -15,8 +15,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "12209:6379"   # expose on host port 12209 to match existing REDIS_URL on host
     volumes:
       - redis_data:/data
     command: redis-server --save 60 1 --loglevel warning

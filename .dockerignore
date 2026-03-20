@@ -5,3 +5,6 @@ __pycache__
 data/
 .git
 .claude
+portal/node_modules
+portal/dist
+portal_dist
