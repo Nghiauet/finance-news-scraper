@@ -254,28 +254,36 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
         else:
             log.warning("[%s] [%s] LLM failed — skipping", source_name, n)
 
+        # Update news list incrementally so articles are visible immediately
+        if results and not dry_run:
+            _flush_news(source_name, results)
 
     log.info("[%s] finished: %d/%d articles in %.1fs", source_name, len(results), limit, time.monotonic() - t_source)
 
     if results and not dry_run:
-        payload = [
-            {
-                "title": a.title,
-                "url": a.url,
-                "source": a.source,
-                "published_at": a.published_at,
-                "summary": a.summary,
-                "tickers": a.tickers,
-                "thumbnail": a.thumbnail,
-                "content": a.content,
-                "is_relevant": a.is_relevant,
-                "scraped_at": a.scraped_at,
-            }
-            for a in results
-        ]
-        cache_client.set_news(source_name, payload)
+        _flush_news(source_name, results)
 
     return results
+
+
+def _flush_news(source_name: str, results: list[Article]) -> None:
+    """Write current results to the news:<source> cache list."""
+    payload = [
+        {
+            "title": a.title,
+            "url": a.url,
+            "source": a.source,
+            "published_at": a.published_at,
+            "summary": a.summary,
+            "tickers": a.tickers,
+            "thumbnail": a.thumbnail,
+            "content": a.content,
+            "is_relevant": a.is_relevant,
+            "scraped_at": a.scraped_at,
+        }
+        for a in results
+    ]
+    cache_client.set_news(source_name, payload)
 
 
 if __name__ == "__main__":
