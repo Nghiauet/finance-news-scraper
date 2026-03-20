@@ -121,7 +121,22 @@ class NewsDetailResponse(BaseModel):
 # Background refresh
 # ---------------------------------------------------------------------------
 
+_refresh_running = False
+
+
 async def _refresh_all():
+    global _refresh_running
+    if _refresh_running:
+        log.warning("[CRON] refresh already running — skipping")
+        return
+    _refresh_running = True
+    try:
+        await _do_refresh()
+    finally:
+        _refresh_running = False
+
+
+async def _do_refresh():
     sources = list(SOURCES)
     total = len(sources)
     t_all = time.monotonic()
@@ -459,6 +474,21 @@ def admin_errors(
     since = int(time.time()) - (hours * 3600)
     errors = cache_client.get_error_log(since=since, limit=500)
     return {"success": True, "data": {"errors": errors, "hours": hours}, "meta": _admin_meta(t0)}
+
+
+@app.post("/admin/refresh-all")
+async def admin_refresh_all(_user: str = Depends(require_admin)):
+    t0 = time.monotonic()
+    if _refresh_running:
+        raise HTTPException(status_code=409, detail="A refresh is already running")
+    asyncio.create_task(_refresh_all())
+    return {"success": True, "data": {"message": "Refresh started"}, "meta": _admin_meta(t0)}
+
+
+@app.get("/admin/refresh-status")
+def admin_refresh_status(_user: str = Depends(require_admin)):
+    t0 = time.monotonic()
+    return {"success": True, "data": {"running": _refresh_running}, "meta": _admin_meta(t0)}
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
-import { Newspaper, Globe, Cpu, Database, Clock, CheckCircle, XCircle, AlertTriangle } from "lucide-react"
+import { Newspaper, Globe, Cpu, Database, Clock, CheckCircle, XCircle, AlertTriangle, RefreshCw } from "lucide-react"
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts"
-import { useAdminStats, useAdminCron } from "@/api/hooks"
+import { useAdminStats, useAdminCron, useRefreshAll, useRefreshStatus } from "@/api/hooks"
 import StatsCard from "@/components/StatsCard"
 
 function formatCronTime(ts: number) {
@@ -11,6 +11,10 @@ function formatCronTime(ts: number) {
 export default function DashboardPage() {
   const { data, isLoading, error } = useAdminStats()
   const { data: cronData } = useAdminCron()
+  const refreshAllMut = useRefreshAll()
+  const { data: statusData } = useRefreshStatus()
+
+  const isRefreshing = statusData?.data?.running === true
 
   if (isLoading) return <div className="text-gray-500">Loading...</div>
   if (error) return <div className="text-red-500">Error: {(error as Error).message}</div>
@@ -43,14 +47,33 @@ export default function DashboardPage() {
       </div>
 
       {/* Cron Job Status */}
-      {lastRun && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-              <Clock size={16} /> Last Cron Run
-            </h3>
-            <span className="text-xs text-gray-400">{formatCronTime(lastRun.started_at)}</span>
+      <div className="bg-white rounded-xl border border-gray-200 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
+            <Clock size={16} /> Cron Job
+          </h3>
+          <div className="flex items-center gap-3">
+            {lastRun && <span className="text-xs text-gray-400">Last: {formatCronTime(lastRun.started_at)}</span>}
+            {isRefreshing && <span className="text-xs text-blue-600 font-medium animate-pulse">Running...</span>}
+            <button
+              onClick={() => {
+                if (!confirm("Run a full refresh of all sources now?")) return
+                refreshAllMut.mutate()
+              }}
+              disabled={isRefreshing || refreshAllMut.isPending}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
+              {isRefreshing ? "Running..." : "Run Now"}
+            </button>
           </div>
+        </div>
+        {refreshAllMut.isError && (
+          <div className="mb-3 text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
+            {(refreshAllMut.error as Error).message}
+          </div>
+        )}
+        {lastRun && (
           <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
             <div>
               <span className="text-gray-400">Duration</span>
@@ -86,8 +109,8 @@ export default function DashboardPage() {
               </p>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Cron Duration Chart */}
       {durationChart.length > 1 && (

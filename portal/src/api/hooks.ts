@@ -167,6 +167,26 @@ export function useAdminErrors(hours = 24) {
   })
 }
 
+export function useRefreshAll() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<any>("/admin/refresh-all"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "cron"] })
+      qc.invalidateQueries({ queryKey: ["admin", "stats"] })
+      qc.invalidateQueries({ queryKey: ["news"] })
+    },
+  })
+}
+
+export function useRefreshStatus() {
+  return useQuery({
+    queryKey: ["admin", "refresh-status"],
+    queryFn: () => apiFetch<any>("/admin/refresh-status"),
+    refetchInterval: 5000,
+  })
+}
+
 // ---------- Preview hooks ----------
 
 export function usePreviewScrape() {
