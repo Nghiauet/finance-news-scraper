@@ -187,6 +187,19 @@ export function useRefreshStatus() {
   })
 }
 
+export function usePurgeCache() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiPost<any>("/admin/purge"),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["admin", "stats"] })
+      qc.invalidateQueries({ queryKey: ["admin", "cache"] })
+      qc.invalidateQueries({ queryKey: ["admin", "cron"] })
+      qc.invalidateQueries({ queryKey: ["news"] })
+    },
+  })
+}
+
 // ---------- Preview hooks ----------
 
 export function usePreviewScrape() {

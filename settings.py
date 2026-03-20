@@ -10,6 +10,7 @@ _DEFAULTS = {
     "llm_call_delay": {"env": "LLM_CALL_DELAY", "default": 2.0, "type": float},
     "llm_max_input_chars": {"env": "LLM_MAX_INPUT_CHARS", "default": 32000, "type": int},
     "refresh_timeout": {"env": "REFRESH_TIMEOUT", "default": 1800, "type": int},
+    "cache_ttl_hours": {"env": "CACHE_TTL_HOURS", "default": 72, "type": int},
 }
 
 _REDIS_KEY = "settings:general"

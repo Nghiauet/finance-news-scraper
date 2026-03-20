@@ -491,6 +491,22 @@ def admin_refresh_status(_user: str = Depends(require_admin)):
     return {"success": True, "data": {"running": _refresh_running}, "meta": _admin_meta(t0)}
 
 
+@app.post("/admin/purge")
+async def admin_purge(_user: str = Depends(require_admin)):
+    t0 = time.monotonic()
+    if _refresh_running:
+        raise HTTPException(status_code=409, detail="Cannot purge while a refresh is running")
+    counts = cache_client.purge_all_cache()
+    log.info("[PURGE] Deleted %d articles, %d summaries, %d news lists",
+             counts["articles"], counts["summaries"], counts["news"])
+    asyncio.create_task(_refresh_all())
+    return {
+        "success": True,
+        "data": {"purged": counts, "message": "Cache purged, rescrape started"},
+        "meta": _admin_meta(t0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Settings endpoints (auth required)
 # ---------------------------------------------------------------------------

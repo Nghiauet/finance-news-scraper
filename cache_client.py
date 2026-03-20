@@ -18,9 +18,24 @@ load_dotenv()
 log = logging.getLogger(__name__)
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:12209")
-_ARTICLE_TTL = int(os.environ.get("CACHE_ARTICLE_TTL", 259200))   # 3 days
-_SUMMARY_TTL = int(os.environ.get("CACHE_SUMMARY_TTL", 259200))   # 3 days
-_NEWS_TTL    = int(os.environ.get("CACHE_NEWS_TTL",    259200))    # 3 days
+_DEFAULT_TTL = 259200  # 3 days fallback
+
+
+def _get_cache_ttl() -> int:
+    """Read cache_ttl_hours from Redis settings, convert to seconds.
+    Reads directly from Redis to avoid circular import with settings module."""
+    r = _get_client()
+    if r is not None:
+        try:
+            val = r.hget("settings:general", "cache_ttl_hours")
+            if val is not None:
+                return max(1, int(val)) * 3600
+        except Exception:
+            pass
+    env_val = os.environ.get("CACHE_TTL_HOURS")
+    if env_val:
+        return max(1, int(env_val)) * 3600
+    return _DEFAULT_TTL
 
 _client: redis.Redis | None = None
 
@@ -88,7 +103,7 @@ def set_article(
             },
             ensure_ascii=False,
         )
-        r.setex(f"article:{url}", _ARTICLE_TTL, payload)
+        r.setex(f"article:{url}", _get_cache_ttl(), payload)
     except Exception:
         pass
 
@@ -117,7 +132,7 @@ def set_summary(content: str, summary: str) -> None:
     if r is None:
         return
     try:
-        r.setex(_content_key(content), _SUMMARY_TTL, summary)
+        r.setex(_content_key(content), _get_cache_ttl(), summary)
     except Exception:
         pass
 
@@ -142,7 +157,7 @@ def set_news(source: str, articles: list[dict]) -> None:
     if r is None:
         return
     try:
-        r.setex(f"news:{source}", _NEWS_TTL, json.dumps(articles, ensure_ascii=False))
+        r.setex(f"news:{source}", _get_cache_ttl(), json.dumps(articles, ensure_ascii=False))
     except Exception:
         pass
 
@@ -476,13 +491,36 @@ def get_cache_stats() -> dict:
             "source_counts": source_counts,
             "memory_used_mb": round(info.get("used_memory", 0) / (1024 * 1024), 2),
             "ttl_config": {
-                "article_seconds": _ARTICLE_TTL,
-                "summary_seconds": _SUMMARY_TTL,
-                "news_seconds": _NEWS_TTL,
+                "cache_ttl_seconds": _get_cache_ttl(),
             },
         }
     except Exception:
         return {"connected": False}
+
+
+# ---------------------------------------------------------------------------
+# Purge cache data
+# ---------------------------------------------------------------------------
+
+def purge_all_cache() -> dict:
+    """Delete all article:*, summary:*, and news:* keys. Returns counts."""
+    r = _get_client()
+    if r is None:
+        return {"articles": 0, "summaries": 0, "news": 0}
+    counts = {"articles": 0, "summaries": 0, "news": 0}
+    try:
+        for key in r.scan_iter("article:*", count=500):
+            r.delete(key)
+            counts["articles"] += 1
+        for key in r.scan_iter("summary:*", count=500):
+            r.delete(key)
+            counts["summaries"] += 1
+        for key in r.scan_iter("news:*", count=500):
+            r.delete(key)
+            counts["news"] += 1
+    except Exception:
+        pass
+    return counts
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +582,7 @@ def rebuild_news_from_articles(sources: dict) -> int:
             if not r.exists(f"news:{source_name}"):
                 r.setex(
                     f"news:{source_name}",
-                    _NEWS_TTL,
+                    _get_cache_ttl(),
                     json.dumps(articles, ensure_ascii=False),
                 )
                 rebuilt += 1

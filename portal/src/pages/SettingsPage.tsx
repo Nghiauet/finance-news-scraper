@@ -1,11 +1,12 @@
 import { useState, useEffect } from "react"
-import { Save, RotateCcw, CheckCircle } from "lucide-react"
-import { useSettings, useUpdateSettings, useResetSettings } from "@/api/hooks"
+import { Save, RotateCcw, CheckCircle, Trash2 } from "lucide-react"
+import { useSettings, useUpdateSettings, useResetSettings, usePurgeCache } from "@/api/hooks"
 
 export default function SettingsPage() {
   const { data, isLoading, error } = useSettings()
   const updateMut = useUpdateSettings()
   const resetMut = useResetSettings()
+  const purgeMut = usePurgeCache()
   const [values, setValues] = useState<Record<string, string>>({})
   const [saved, setSaved] = useState(false)
 
@@ -57,6 +58,12 @@ export default function SettingsPage() {
     llm_call_delay: "LLM Call Delay (seconds)",
     llm_max_input_chars: "Max Input Chars",
     refresh_timeout: "Refresh Timeout (seconds)",
+    cache_ttl_hours: "Cache TTL (hours)",
+  }
+
+  function handlePurge() {
+    if (!confirm("This will DELETE all cached articles, summaries, and news lists from Redis, then rescrape everything from scratch.\n\nThis will trigger many LLM calls. Continue?")) return
+    purgeMut.mutate()
   }
 
   return (
@@ -136,6 +143,43 @@ export default function SettingsPage() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Danger Zone */}
+      <div className="bg-white rounded-xl border border-red-200 overflow-hidden">
+        <div className="p-4 border-b border-red-200 bg-red-50">
+          <h3 className="text-sm font-semibold text-red-700">Danger Zone</h3>
+        </div>
+        <div className="p-4 flex items-center justify-between">
+          <div>
+            <p className="text-sm font-medium text-gray-800">Purge cache & rescrape</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              Delete all cached articles, summaries, and news lists. Then rescrape all sources from scratch (triggers LLM calls for every article).
+            </p>
+          </div>
+          <button
+            onClick={handlePurge}
+            disabled={purgeMut.isPending}
+            className="flex items-center gap-1.5 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 shrink-0 ml-4"
+          >
+            <Trash2 size={14} />
+            {purgeMut.isPending ? "Purging..." : "Purge & Rescrape"}
+          </button>
+        </div>
+        {purgeMut.isSuccess && (
+          <div className="px-4 pb-4">
+            <div className="bg-green-50 text-green-700 text-sm px-3 py-2 rounded-lg border border-green-200">
+              Purged {purgeMut.data?.data?.purged?.articles ?? 0} articles, {purgeMut.data?.data?.purged?.summaries ?? 0} summaries, {purgeMut.data?.data?.purged?.news ?? 0} news lists. Rescrape started.
+            </div>
+          </div>
+        )}
+        {purgeMut.isError && (
+          <div className="px-4 pb-4">
+            <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">
+              {(purgeMut.error as Error).message}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )
