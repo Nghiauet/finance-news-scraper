@@ -57,7 +57,7 @@ export default function DashboardPage() {
             {isRefreshing && <span className="text-xs text-blue-600 font-medium animate-pulse">Running...</span>}
             <button
               onClick={() => {
-                if (!confirm("Run a full refresh of all sources now?")) return
+                if (!confirm("Scrape all sources for new articles now? (Same as the automatic 30-min cron)")) return
                 refreshAllMut.mutate()
               }}
               disabled={isRefreshing || refreshAllMut.isPending}
