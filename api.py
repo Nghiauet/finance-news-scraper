@@ -226,6 +226,8 @@ def get_news(
     source: Optional[str] = Query(default=None, description="Filter by source name."),
     limit: int = Query(default=20, ge=1, le=100, description="Max items per page."),
     cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
+    sort: Optional[str] = Query(default="newest", description="Sort order: newest or oldest."),
+    q: Optional[str] = Query(default=None, description="Search query (title, summary, tickers)."),
 ):
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
@@ -248,6 +250,24 @@ def get_news(
         ]
 
     normalized = [_normalize_article(a) for a in raw_articles if a.get("is_relevant", True)]
+
+    # Search filter
+    if q:
+        q_lower = q.lower()
+        normalized = [
+            a for a in normalized
+            if q_lower in (a.get("title") or "").lower()
+            or q_lower in (a.get("summary") or "").lower()
+            or any(q_lower in t.lower() for t in a.get("tickers", []))
+        ]
+
+    # Sort by published_at
+    if sort in ("newest", "oldest"):
+        normalized.sort(
+            key=lambda a: a.get("published_at") or "",
+            reverse=(sort == "newest"),
+        )
+
     max_total = settings_mod.get_setting("max_total_news")
     if max_total > 0:
         normalized = normalized[:max_total]

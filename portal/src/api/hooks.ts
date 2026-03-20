@@ -35,15 +35,17 @@ export function useAdminCache() {
   })
 }
 
-export function useNewsList(source?: string, limit = 20, cursor?: string) {
+export function useNewsList(source?: string, limit = 20, cursor?: string, sort = "newest", q?: string) {
   const params = new URLSearchParams()
   if (source) params.set("source", source)
   params.set("limit", String(limit))
   if (cursor) params.set("cursor", cursor)
+  if (sort) params.set("sort", sort)
+  if (q) params.set("q", q)
   const qs = params.toString()
 
   return useQuery({
-    queryKey: ["news", source, limit, cursor],
+    queryKey: ["news", source, limit, cursor, sort, q],
     queryFn: () => apiFetch<any>(`/news?${qs}`),
   })
 }
