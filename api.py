@@ -279,6 +279,15 @@ def get_news(
 
     normalized = [_normalize_article(a) for a in raw_articles if a.get("is_relevant", True)]
 
+    seen_titles: set[str] = set()
+    deduped = []
+    for a in normalized:
+        title_key = a["title"].strip().lower()
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
+            deduped.append(a)
+    normalized = deduped
+
     # Search filter
     if q:
         q_lower = q.lower()

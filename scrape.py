@@ -79,13 +79,24 @@ def get_article_links(url: str, domain: str, weak_ssl: bool = False,
         title = a.get_text(strip=True)
         if not href or not title or len(title) < 15:
             continue
-        if not href.startswith("http"):
+        if href.startswith("//"):
+            href = f"https:{href}"
+        elif not href.startswith("http"):
             href = f"https://{domain}{href}"
         if domain in href:
             articles.append({"title": title, "url": href})
 
-    seen = set()
-    return [a for a in articles if not (a["url"] in seen or seen.add(a["url"]))]
+    seen_urls = set()
+    seen_titles = set()
+    unique = []
+    for a in articles:
+        title_key = a["title"].strip().lower()
+        if a["url"] in seen_urls or title_key in seen_titles:
+            continue
+        seen_urls.add(a["url"])
+        seen_titles.add(title_key)
+        unique.append(a)
+    return unique
 
 
 def _extract_thumbnail(soup: BeautifulSoup) -> Optional[dict]:
@@ -171,7 +182,7 @@ SOURCES = {
     "vneconomy": {"url": "https://vneconomy.vn/chung-khoan.htm", "domain": "vneconomy.vn"},
     "kinhtechungkhoan": {"url": "https://kinhtechungkhoan.vn/", "domain": "kinhtechungkhoan.vn"},
     "thoibaonganhang": {"url": "https://thoibaonganhang.vn/thi-truong-chung-khoan-24.html", "domain": "thoibaonganhang.vn"},
-    "cafebiz": {"url": "https://cafebiz.vn/", "domain": "cafebiz.vn"},
+    "cafebiz": {"url": "https://cafebiz.vn/cau-chuyen-kinh-doanh/chung-khoan.chn", "domain": "cafebiz.vn"},
     "nguoiquansat": {"url": "https://nguoiquansat.vn/chung-khoan/", "domain": "nguoiquansat.vn"},
     "stockbiz": {
         "url": "https://stockbiz.vn/thi-truong",
