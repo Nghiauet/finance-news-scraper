@@ -85,6 +85,10 @@ def set_article(
     thumbnail: dict | None = None,
     content: str | None = None,
     is_relevant: bool = True,
+    *,
+    title_en: str | None = None,
+    summary_en: str | None = None,
+    content_en: str | None = None,
 ) -> None:
     r = _get_client()
     if r is None:
@@ -99,6 +103,9 @@ def set_article(
                 "thumbnail": thumbnail,
                 "content": content,
                 "is_relevant": is_relevant,
+                "title_en": title_en,
+                "summary_en": summary_en,
+                "content_en": content_en,
                 "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
             },
             ensure_ascii=False,

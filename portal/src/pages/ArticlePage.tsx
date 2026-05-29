@@ -1,10 +1,19 @@
-import { useParams, Link } from "react-router-dom"
+import { useParams, Link, useSearchParams } from "react-router-dom"
 import { ArrowLeft } from "lucide-react"
-import { useNewsDetail } from "@/api/hooks"
+import { useNewsDetail, type Language } from "@/api/hooks"
 
 export default function ArticlePage() {
   const { id } = useParams<{ id: string }>()
-  const { data, isLoading, error } = useNewsDetail(id!)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const language: Language = searchParams.get("language") === "en" ? "en" : "vi"
+  const { data, isLoading, error } = useNewsDetail(id!, language)
+
+  function setLanguage(next: Language) {
+    const sp = new URLSearchParams(searchParams)
+    if (next === "vi") sp.delete("language")
+    else sp.set("language", next)
+    setSearchParams(sp, { replace: true })
+  }
 
   if (isLoading) return <div className="text-gray-500">Loading...</div>
   if (error) return <div className="text-red-500">Error: {(error as Error).message}</div>
@@ -14,9 +23,25 @@ export default function ArticlePage() {
 
   return (
     <div className="max-w-3xl space-y-4">
-      <Link to="/news" className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline">
-        <ArrowLeft size={16} /> Back to news
-      </Link>
+      <div className="flex items-center justify-between">
+        <Link to="/news" className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline">
+          <ArrowLeft size={16} /> Back to news
+        </Link>
+        <div className="inline-flex rounded-lg border border-gray-300 overflow-hidden text-xs">
+          <button
+            onClick={() => setLanguage("vi")}
+            className={`px-3 py-1 ${language === "vi" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+          >
+            Tiếng Việt
+          </button>
+          <button
+            onClick={() => setLanguage("en")}
+            className={`px-3 py-1 border-l border-gray-300 ${language === "en" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"}`}
+          >
+            English
+          </button>
+        </div>
+      </div>
 
       {article.thumbnail?.url && (
         <img
@@ -31,7 +56,7 @@ export default function ArticlePage() {
       <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
         <span>{article.source}</span>
         {article.published_at && (
-          <span>{new Date(article.published_at).toLocaleString("vi-VN")}</span>
+          <span>{new Date(article.published_at).toLocaleString(language === "en" ? "en-US" : "vi-VN")}</span>
         )}
         <a href={article.url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
           Original

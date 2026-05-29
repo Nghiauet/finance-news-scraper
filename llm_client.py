@@ -17,20 +17,20 @@ log = logging.getLogger(__name__)
 
 _call_lock = threading.Lock()
 
-_SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON với 6 trường sau.
+_SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON song ngữ Việt-Anh với 9 trường sau.
 
 Hôm nay là {today}. Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm từ kiến thức bên ngoài.
 
-## 1. title
+## 1. title (tiếng Việt)
 Viết lại tiêu đề rõ ràng, súc tích, dưới 100 ký tự. Nêu bật: ai, cái gì, con số quan trọng nhất. Không sao chép nguyên tiêu đề gốc.
 
 ## 2. published_at
 ISO 8601 với múi giờ +07:00. Nếu chỉ có ngày → T00:00:00+07:00. Không tìm thấy → null.
 
-## 3. summary
+## 3. summary (tiếng Việt)
 Tóm tắt ngắn gọn 1-2 câu, chỉ giữ lại thông tin quan trọng nhất: sự kiện chính, con số nổi bật (giá, %, giá trị giao dịch). Viết dạng văn xuôi, KHÔNG dùng markdown/emojis/bullet points. Người đọc phải hiểu ngay nội dung mà không cần đọc bài.
 
-## 4. content
+## 4. content (tiếng Việt)
 Tóm tắt nội dung bài báo dạng markdown, tập trung vào thông tin có giá trị cho nhà đầu tư:
 - Sự kiện chính và con số cụ thể (giữ nguyên số liệu, không làm tròn)
 - Nguyên nhân/bối cảnh (nếu có)
@@ -40,20 +40,34 @@ Tóm tắt nội dung bài báo dạng markdown, tập trung vào thông tin có
 - Bỏ qua thông tin không có giá trị: quảng cáo, lời dẫn dắt rườm rà, nội dung lặp lại
 - Viết ngắn gọn, đi thẳng vào trọng tâm. Độ dài tỷ lệ với lượng thông tin có giá trị trong bài.
 
-## 5. tickers
-Mã cổ phiếu Việt Nam (2-5 ký tự IN HOA) được nhắc trực tiếp hoặc suy ra rõ ràng (ví dụ: "Vinamilk" → VNM). Trả về [] nếu không có.
+## 5. title_en (bản dịch tiếng Anh của `title`)
+Dịch ý sang tiếng Anh tự nhiên, ngắn gọn, phù hợp độc giả là nhà đầu tư quốc tế. KHÔNG dịch word-by-word. Giữ nguyên tên riêng tiếng Việt (ví dụ: "Vinamilk", "Hòa Phát") và mã cổ phiếu (HPG, VNM). Dưới 100 ký tự.
 
-## 6. is_relevant
-true nếu liên quan tài chính/đầu tư/chứng khoán/kinh tế. false nếu tin xã hội/giải trí/thể thao/đời sống. Nghi ngờ → true."""
+## 6. summary_en (bản dịch tiếng Anh của `summary`)
+Văn xuôi tự nhiên, 1-2 câu, KHÔNG markdown/emoji/bullet. Giữ nguyên số liệu, đơn vị tiền tệ (VND, USD, tỷ đồng → "trillion VND"/"billion VND" hoặc giữ nguyên), tên riêng và mã cổ phiếu. Phong cách phải tự nhiên như một bản tin tài chính tiếng Anh, không phải dịch máy.
+
+## 7. content_en (bản dịch tiếng Anh của `content`)
+GIỮ NGUYÊN cấu trúc markdown (**bold**, > blockquote, bảng, danh sách) khớp với trường `content`. Dịch ý, không dịch từng từ. Giữ nguyên số liệu, mã cổ phiếu, tên công ty Việt Nam. Phong cách: bản tin tài chính tiếng Anh chuyên nghiệp dành cho nhà đầu tư.
+
+## 8. tickers
+Mã cổ phiếu Việt Nam (2-5 ký tự IN HOA) được nhắc trực tiếp hoặc suy ra rõ ràng (ví dụ: "Vinamilk" → VNM). Trả về [] nếu không có. KHÔNG dịch — luôn dùng mã gốc.
+
+## 9. is_relevant
+true nếu liên quan tài chính/đầu tư/chứng khoán/kinh tế. false nếu tin xã hội/giải trí/thể thao/đời sống. Nghi ngờ → true.
+
+LƯU Ý: Trả về MỘT JSON object phẳng (KHÔNG lồng), gồm đủ 9 trường: title, published_at, summary, content, title_en, summary_en, content_en, tickers, is_relevant."""
 
 
 class ArticleExtraction(BaseModel):
     title: str
-    published_at: Optional[str]
+    published_at: Optional[str] = None
     summary: str
     content: str
     tickers: list[str]
     is_relevant: bool
+    title_en: Optional[str] = None
+    summary_en: Optional[str] = None
+    content_en: Optional[str] = None
 
 
 @dataclass
@@ -148,19 +162,24 @@ def extract_and_summarize(text: str) -> Optional[dict]:
 
     cached = cache_client.get_summary(text)
     if cached:
-        log.debug("Summary cache hit")
         try:
-            return json.loads(cached)
+            cached_obj = json.loads(cached)
+            if isinstance(cached_obj, dict) and cached_obj.get("title_en"):
+                log.debug("Summary cache hit")
+                return cached_obj
+            log.info("Summary cache hit (legacy, missing EN) — calling LLM to upgrade")
         except (json.JSONDecodeError, TypeError):
-            return {"title": "", "published_at": None, "summary": cached, "content": cached}
+            log.info("Summary cache hit (unparseable) — calling LLM to upgrade")
 
     max_input = settings_mod.get_setting("llm_max_input_chars")
     call_delay = settings_mod.get_setting("llm_call_delay")
+    max_output = settings_mod.get_setting("llm_max_output_tokens")
     truncated = text[:max_input] if len(text) > max_input else text
 
     client, config = _manager.get_active_client()
+    attempts = 3
     with _call_lock:
-        for attempt in range(2):
+        for attempt in range(attempts):
             try:
                 t0 = time.monotonic()
                 resp = client.chat.completions.create(
@@ -171,13 +190,23 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                     ],
                     response_format={"type": "json_object"},
                     temperature=0.3,
+                    max_tokens=max_output,
                 )
                 elapsed = time.monotonic() - t0
                 choice = resp.choices[0]
                 finish_reason = choice.finish_reason
-                if finish_reason == "length":
-                    log.warning("LLM output truncated (finish_reason=length)")
                 raw = choice.message.content
+                # The endpoint occasionally returns an empty completion or cuts
+                # the JSON off mid-string (finish_reason=length). Both yield
+                # invalid JSON — treat as a retryable failure with a clear message
+                # instead of letting json.loads/strip raise a cryptic error.
+                if not raw or not raw.strip():
+                    raise ValueError("empty LLM response (no content returned)")
+                if finish_reason == "length":
+                    raise ValueError(
+                        f"LLM output truncated at max_tokens={max_output} "
+                        "(finish_reason=length) — raise llm_max_output_tokens"
+                    )
                 extraction = _sanitize_and_parse_json(raw)
                 result = extraction.model_dump()
                 cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
@@ -195,10 +224,10 @@ def extract_and_summarize(text: str) -> Optional[dict]:
             except Exception as e:
                 cache_client.record_llm_error(model_id=config.id)
                 cache_client.record_error("llm", str(e), model_id=config.id)
-                log.warning("LLM attempt %d failed: %s", attempt + 1, e)
-                if attempt == 1:
+                log.warning("LLM attempt %d/%d failed: %s", attempt + 1, attempts, e)
+                if attempt == attempts - 1:
                     break
-        log.error("LLM failed after 2 attempts — skipping article")
+        log.error("LLM failed after %d attempts — skipping article", attempts)
         return None
 
 

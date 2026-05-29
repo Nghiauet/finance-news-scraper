@@ -35,25 +35,36 @@ export function useAdminCache() {
   })
 }
 
-export function useNewsList(source?: string, limit = 20, cursor?: string, sort = "newest", q?: string) {
+export type Language = "vi" | "en"
+
+export function useNewsList(
+  source?: string,
+  limit = 20,
+  cursor?: string,
+  sort = "newest",
+  q?: string,
+  language: Language = "vi",
+) {
   const params = new URLSearchParams()
   if (source) params.set("source", source)
   params.set("limit", String(limit))
   if (cursor) params.set("cursor", cursor)
   if (sort) params.set("sort", sort)
   if (q) params.set("q", q)
+  if (language && language !== "vi") params.set("language", language)
   const qs = params.toString()
 
   return useQuery({
-    queryKey: ["news", source, limit, cursor, sort, q],
+    queryKey: ["news", source, limit, cursor, sort, q, language],
     queryFn: () => apiFetch<any>(`/news?${qs}`),
   })
 }
 
-export function useNewsDetail(id: string) {
+export function useNewsDetail(id: string, language: Language = "vi") {
+  const qs = language !== "vi" ? `?language=${language}` : ""
   return useQuery({
-    queryKey: ["news", id],
-    queryFn: () => apiFetch<any>(`/news/${id}`),
+    queryKey: ["news", id, language],
+    queryFn: () => apiFetch<any>(`/news/${id}${qs}`),
     enabled: !!id,
   })
 }

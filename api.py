@@ -52,19 +52,57 @@ def _make_id(url: str) -> str:
     return str(digest % (10 ** 18))
 
 
-def _normalize_article(raw: dict) -> dict:
+SUPPORTED_LANGUAGES = {"vi", "en", "all"}
+
+
+def _resolve_article(raw: dict, language: str) -> Optional[dict]:
+    """Pick title/summary/content for the requested language. Returns None if
+    the article lacks a translation in the requested language so the caller
+    can skip it (e.g. EN requested but only VI extracted so far).
+
+    language="all" returns every available field (both VI and EN) raw — used
+    by downstream ingestion services that want to cache both languages in one
+    upstream call."""
     url = raw.get("url", "")
+    if language == "all":
+        return {
+            "id": _make_id(url),
+            "title": raw.get("title", ""),
+            "title_en": raw.get("title_en"),
+            "url": url,
+            "source": raw.get("source", ""),
+            "published_at": raw.get("published_at"),
+            "summary": raw.get("summary"),
+            "summary_en": raw.get("summary_en"),
+            "tickers": raw.get("tickers", []),
+            "thumbnail": raw.get("thumbnail"),
+            "content": raw.get("content"),
+            "content_en": raw.get("content_en"),
+            "scraped_at": raw.get("scraped_at"),
+            "language": "all",
+        }
+    if language == "en":
+        title = raw.get("title_en")
+        if not title:
+            return None
+        summary = raw.get("summary_en")
+        content = raw.get("content_en")
+    else:
+        title = raw.get("title", "")
+        summary = raw.get("summary")
+        content = raw.get("content")
     return {
         "id": _make_id(url),
-        "title": raw.get("title", ""),
+        "title": title,
         "url": url,
         "source": raw.get("source", ""),
         "published_at": raw.get("published_at"),
-        "summary": raw.get("summary"),
+        "summary": summary,
         "tickers": raw.get("tickers", []),
         "thumbnail": raw.get("thumbnail"),
-        "content": raw.get("content"),
+        "content": content,
         "scraped_at": raw.get("scraped_at"),
+        "language": language,
     }
 
 
@@ -90,6 +128,10 @@ class ArticleItem(BaseModel):
     thumbnail: Optional[Thumbnail] = None
     content: Optional[str] = None
     scraped_at: Optional[str] = None
+    language: str = "vi"
+    title_en: Optional[str] = None
+    summary_en: Optional[str] = None
+    content_en: Optional[str] = None
 
 
 class Pagination(BaseModel):
@@ -175,6 +217,9 @@ async def _do_refresh():
                     "content": a.content,
                     "is_relevant": a.is_relevant,
                     "scraped_at": a.scraped_at,
+                    "title_en": a.title_en,
+                    "summary_en": a.summary_en,
+                    "content_en": a.content_en,
                 }
                 for a in articles
             ]
@@ -256,6 +301,11 @@ def get_news(
     cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
     sort: Optional[str] = Query(default="newest", description="Sort: newest, oldest, recent (by scrape time)."),
     q: Optional[str] = Query(default=None, description="Search query (title, summary, tickers)."),
+    language: str = Query(
+        default="vi",
+        description="Response language: 'vi' (default) or 'en'.",
+        pattern="^(vi|en|all)$",
+    ),
 ):
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
@@ -277,7 +327,13 @@ def get_news(
             for article in [bucket[i]]
         ]
 
-    normalized = [_normalize_article(a) for a in raw_articles if a.get("is_relevant", True)]
+    normalized = [
+        art
+        for a in raw_articles
+        if a.get("is_relevant", True)
+        for art in [_resolve_article(a, language)]
+        if art is not None
+    ]
 
     seen_titles: set[str] = set()
     deduped = []
@@ -334,14 +390,26 @@ def get_news(
 
 
 @app.get("/news/{article_id}", response_model=NewsDetailResponse)
-def get_news_detail(article_id: str):
+def get_news_detail(
+    article_id: str,
+    language: str = Query(
+        default="vi",
+        description="Response language: 'vi' (default) or 'en'.",
+        pattern="^(vi|en|all)$",
+    ),
+):
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
 
     for name in SOURCES:
         for raw in cache_client.get_news(name):
             if _make_id(raw.get("url", "")) == article_id and raw.get("is_relevant", True):
-                article = _normalize_article(raw)
+                article = _resolve_article(raw, language)
+                if article is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Article '{article_id}' not available in language '{language}'.",
+                    )
                 took_ms = int((time.monotonic() - t0) * 1000)
                 return NewsDetailResponse(
                     data=ArticleItem(**article),

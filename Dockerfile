@@ -1,6 +1,6 @@
 # Stage 1: Build frontend
 FROM node:20-alpine AS frontend-builder
-ARG VITE_BASE_PATH=/news-portal/
+ARG VITE_BASE_PATH=/portal/
 ENV VITE_BASE_PATH=${VITE_BASE_PATH}
 WORKDIR /frontend
 COPY portal/package.json portal/package-lock.json ./

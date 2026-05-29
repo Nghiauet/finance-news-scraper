@@ -48,6 +48,7 @@ Optional overrides:
 | `CACHE_SUMMARY_TTL` | 259200 (3d) | Redis TTL for LLM result cache |
 | `CACHE_NEWS_TTL` | 259200 (3d) | Redis TTL for news list cache |
 | `LLM_MAX_INPUT_CHARS` | 32000 | Max chars sent to LLM per article |
+| `LLM_MAX_OUTPUT_TOKENS` | 8192 | Max completion tokens per LLM call (too low → truncated JSON; bilingual output is ~2x longer) |
 | `LLM_CALL_DELAY` | 2 | Seconds to sleep between LLM calls (rate limiting) |
 
 ## Architecture
@@ -60,7 +61,7 @@ Two modes: **CLI batch scraper** (`scrape.py`) and **FastAPI server** (`api.py`)
 category page → article links (h2/h3/h4 a selectors) → page text + OG thumbnail → LLM extract+summarize → Redis / JSON
 ```
 
-No per-source parsing logic. The LLM handles all extraction (title, date, summary, content, tickers, relevance) in one call with a Vietnamese-language system prompt. LLM output is validated via Pydantic (`ArticleExtraction` in `llm_client.py`).
+No per-source parsing logic. The LLM handles all extraction (title, date, summary, content, tickers, relevance) **plus an English translation of title/summary/content** in one call with a Vietnamese-language system prompt. LLM output is validated via Pydantic (`ArticleExtraction` in `llm_client.py`). Tickers stay Vietnamese-only regardless of requested API language.
 
 ### Module roles
 
@@ -74,31 +75,35 @@ No per-source parsing logic. The LLM handles all extraction (title, date, summar
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check (`{"status": "ok"}`) |
-| `GET /news` | List articles. Params: `source`, `limit` (1–100, default 20), `cursor` (pagination by article id) |
-| `GET /news/{id}` | Single article detail (includes `content` field) |
+| `GET /news` | List articles. Params: `source`, `limit` (1–100, default 20), `cursor` (pagination by article id), `sort`, `q`, `language` (`vi` default, `en`, `all`) |
+| `GET /news/{id}` | Single article detail (includes `content` field). Param: `language` (`vi` default, `en`, `all`) |
 
 - `id`: stable 18-digit numeric string from `sha256(url) % 10^18`
 - Articles with `is_relevant: false` are filtered out of API responses
+- `language=en` returns the English translation of `title`/`summary`/`content`. Articles without an English translation (legacy cached entries pending re-extraction by the cron) are **excluded** from `/news` and return **404** from `/news/{id}` — no Vietnamese fallback. `language=all` returns both VI and EN fields.
 - Response envelope: `{ success, data, pagination, meta: { request_id, took_ms } }`
 - Error envelope: `{ success: false, error: { code, message } }`
 
 ### Article schema
 
-`{ id, title, url, source, published_at, summary, tickers, thumbnail, content }`
+`{ id, title, url, source, published_at, summary, tickers, thumbnail, content, language }`
 
 - `published_at`: ISO 8601 with `+07:00` timezone or `null`
 - `source`: canonical domain (e.g. `cafef.vn`)
 - `thumbnail`: `{ url, width?, height?, alt? }` from Open Graph meta tags
 - `content`: markdown-formatted full article text (rewritten by LLM)
-- `tickers`: list of Vietnamese stock ticker symbols (2–5 uppercase chars)
+- `tickers`: list of Vietnamese stock ticker symbols (2–5 uppercase chars), language-agnostic
+- `language`: `"vi"` or `"en"` — the language of the fields in this response (mirrors the request param)
 
 ### Redis cache keys
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant}` | 3d |
-| `summary:<sha256>` | LLM JSON result (keyed by sha256 of page text) | 3d |
-| `news:<source>` | Full article list JSON per source | 3d |
+| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant, title_en, summary_en, content_en}` | 3d |
+| `summary:<sha256>` | LLM JSON result (keyed by sha256 of page text); includes both VI and EN fields | 3d |
+| `news:<source>` | Full article list JSON per source (each entry carries both VI and EN fields) | 3d |
+
+Legacy `article:<url>` / `summary:<sha256>` entries written before bilingual support lack the `*_en` fields. The scraper re-extracts them on the next refresh cycle (cache-hit branch checks for `title_en`).
 
 ### Docker
 

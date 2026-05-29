@@ -6,6 +6,7 @@ import {
 } from "lucide-react"
 import {
   useNewsList, useAdminSources, usePreviewScrape, useRefreshSource,
+  type Language,
 } from "@/api/hooks"
 
 export default function NewsPage() {
@@ -14,13 +15,16 @@ export default function NewsPage() {
   const [sort, setSort] = useState<string>("newest")
   const [searchInput, setSearchInput] = useState("")
   const [q, setQ] = useState<string | undefined>()
+  const [language, setLanguage] = useState<Language>(
+    () => (localStorage.getItem("news.language") as Language) || "vi",
+  )
   const [showPreview, setShowPreview] = useState(false)
   const [previewSource, setPreviewSource] = useState("")
   const [previewLimit, setPreviewLimit] = useState(5)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
   const { data: sourcesData } = useAdminSources()
-  const { data, isLoading, error } = useNewsList(source || undefined, 20, cursor, sort, q)
+  const { data, isLoading, error } = useNewsList(source || undefined, 20, cursor, sort, q, language)
   const previewMut = usePreviewScrape()
   const refreshMut = useRefreshSource()
 
@@ -120,6 +124,22 @@ export default function NewsPage() {
             {sources.map((s: any) => (
               <option key={s.name} value={s.name}>{s.name}</option>
             ))}
+          </select>
+
+          {/* Language */}
+          <select
+            value={language}
+            onChange={(e) => {
+              const next = e.target.value as Language
+              setLanguage(next)
+              localStorage.setItem("news.language", next)
+              setCursor(undefined)
+            }}
+            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white"
+            title="Response language"
+          >
+            <option value="vi">Tiếng Việt</option>
+            <option value="en">English</option>
           </select>
         </div>
       </div>
@@ -266,14 +286,17 @@ export default function NewsPage() {
             {articles.map((a: any) => (
               <tr key={a.id} className="hover:bg-gray-50">
                 <td className="px-4 py-2">
-                  <Link to={`/news/${a.id}`} className="text-blue-600 hover:underline font-medium">
+                  <Link
+                    to={`/news/${a.id}${language !== "vi" ? `?language=${language}` : ""}`}
+                    className="text-blue-600 hover:underline font-medium"
+                  >
                     {a.title || "(No title)"}
                   </Link>
                   {a.summary && <p className="text-xs text-gray-400 mt-0.5 line-clamp-1">{a.summary}</p>}
                 </td>
                 <td className="px-4 py-2 text-gray-500">{a.source}</td>
                 <td className="px-4 py-2 text-gray-500 text-xs">
-                  {a.published_at ? new Date(a.published_at).toLocaleString("vi-VN") : "-"}
+                  {a.published_at ? new Date(a.published_at).toLocaleString(language === "en" ? "en-US" : "vi-VN") : "-"}
                 </td>
                 <td className="px-4 py-2">
                   <div className="flex flex-wrap gap-1">

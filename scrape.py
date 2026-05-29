@@ -36,6 +36,9 @@ class Article:
     content: Optional[str] = None
     is_relevant: bool = True
     scraped_at: Optional[str] = None
+    title_en: Optional[str] = None
+    summary_en: Optional[str] = None
+    content_en: Optional[str] = None
 
 
 HEADERS = {
@@ -214,7 +217,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
         log.info("[%s] [%s] %s", source_name, n, meta["title"][:70])
 
         cached = cache_client.get_article(url)
-        if cached:
+        if cached and cached.get("title_en"):
             log.info("[%s] [%s] cache hit", source_name, n)
             article = Article(
                 title=cached.get("title", meta["title"]),
@@ -227,9 +230,14 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 content=cached.get("content"),
                 is_relevant=cached.get("is_relevant", True),
                 scraped_at=cached.get("scraped_at"),
+                title_en=cached.get("title_en"),
+                summary_en=cached.get("summary_en"),
+                content_en=cached.get("content_en"),
             )
             results.append(article)
             continue
+        elif cached:
+            log.info("[%s] [%s] cache hit (legacy, missing EN — re-extracting)", source_name, n)
 
         if is_nextjs:
             page_text, thumbnail = get_page_data_nextjs(url, weak_ssl=weak_ssl)
@@ -253,12 +261,18 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 content=parsed.get("content"),
                 is_relevant=parsed.get("is_relevant", True),
                 scraped_at=now,
+                title_en=parsed.get("title_en"),
+                summary_en=parsed.get("summary_en"),
+                content_en=parsed.get("content_en"),
             )
             if not dry_run:
                 cache_client.set_article(
                     url, article.title, article.published_at, article.summary,
                     article.tickers, article.thumbnail, article.content,
                     article.is_relevant,
+                    title_en=article.title_en,
+                    summary_en=article.summary_en,
+                    content_en=article.content_en,
                 )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
@@ -291,6 +305,9 @@ def _flush_news(source_name: str, results: list[Article]) -> None:
             "content": a.content,
             "is_relevant": a.is_relevant,
             "scraped_at": a.scraped_at,
+            "title_en": a.title_en,
+            "summary_en": a.summary_en,
+            "content_en": a.content_en,
         }
         for a in results
     ]
