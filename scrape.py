@@ -8,7 +8,7 @@ import os
 import ssl
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +49,43 @@ HEADERS = {
     ),
     "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
 }
+
+VN_TZ = timezone(timedelta(hours=7))
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    """Parse an ISO 8601 string into a tz-aware datetime, or None if unparseable."""
+    try:
+        s = value.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=VN_TZ)
+    return dt
+
+
+def _sanitize_published_at(value: Optional[str]) -> Optional[str]:
+    """Drop a published_at that lies in the future.
+
+    The LLM occasionally mis-extracts a date mentioned in the article body
+    (e.g. a trading-week range like "25-29/6") as the publish date, yielding a
+    future timestamp. A future date pins the article to the top of the
+    newest-first feed forever and renders as "just now" on the frontend, so we
+    discard it (→ null) rather than trust it. Past/parseable dates pass through
+    unchanged; unparseable values are left as-is."""
+    if not value:
+        return value
+    dt = _parse_iso(value)
+    if dt is None:
+        return value
+    now = datetime.now(VN_TZ)
+    if dt > now + timedelta(days=1):
+        log.warning("Dropping future published_at=%s (now=%s)", value, now.isoformat())
+        return None
+    return value
 
 
 def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
@@ -131,23 +168,33 @@ def _extract_next_data(soup: BeautifulSoup) -> Optional[dict]:
     return None
 
 
-def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
-    """Fetch a page and return (visible_text, thumbnail_dict)."""
+def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """Fetch a page and return (visible_text, thumbnail_dict, published_at).
+
+    published_at is None for generic pages — the LLM extracts the date from the
+    text in that case. Next.js pages (get_page_data_nextjs) carry an authoritative
+    date so they return it here."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
-        return None, None
+        return None, None, None
     thumbnail = _extract_thumbnail(soup)
     for tag in soup.select("script, style, nav, footer, header, aside"):
         tag.decompose()
     lines = [line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip()]
-    return "\n".join(lines), thumbnail
+    return "\n".join(lines), thumbnail, None
 
 
-def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
-    """Extract article text from a Next.js page's __NEXT_DATA__ JSON."""
+def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """Extract article text, thumbnail, and the authoritative publish date from a
+    Next.js page's __NEXT_DATA__ JSON.
+
+    The `date` field on the post is the source CMS's real publish timestamp; we
+    return it so the caller can trust it over the LLM's guess (the LLM only sees
+    the body text and can mistake a date mentioned in the prose for the publish
+    date)."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
-        return None, None
+        return None, None, None
 
     thumbnail = _extract_thumbnail(soup)
     data = _extract_next_data(soup)
@@ -166,7 +213,7 @@ def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str
                             if img.get("imageUrl"):
                                 thumbnail = {"url": img["imageUrl"]}
                                 break
-                    return text, thumbnail
+                    return text, thumbnail, article.get("date")
         except (KeyError, IndexError, TypeError):
             log.warning("Failed to parse __NEXT_DATA__ for %s", url)
 
@@ -223,7 +270,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
                 title=cached.get("title", meta["title"]),
                 url=url,
                 source=domain,
-                published_at=cached.get("published_at"),
+                published_at=_sanitize_published_at(cached.get("published_at")),
                 summary=cached.get("summary"),
                 tickers=cached.get("tickers", []),
                 thumbnail=cached.get("thumbnail"),
@@ -240,9 +287,9 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
             log.info("[%s] [%s] cache hit (legacy, missing EN — re-extracting)", source_name, n)
 
         if is_nextjs:
-            page_text, thumbnail = get_page_data_nextjs(url, weak_ssl=weak_ssl)
+            page_text, thumbnail, page_published_at = get_page_data_nextjs(url, weak_ssl=weak_ssl)
         else:
-            page_text, thumbnail = get_page_data(url, weak_ssl=weak_ssl)
+            page_text, thumbnail, page_published_at = get_page_data(url, weak_ssl=weak_ssl)
         if not page_text:
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
@@ -250,11 +297,14 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
         now = time.strftime("%Y-%m-%dT%H:%M:%S+07:00")
         parsed = extract_and_summarize(page_text)
         if parsed:
+            # Prefer the source's authoritative date over the LLM's guess, then
+            # drop it if it's in the future (LLM mis-extraction).
+            published_at = _sanitize_published_at(page_published_at or parsed.get("published_at"))
             article = Article(
                 title=parsed.get("title") or meta["title"],
                 url=url,
                 source=domain,
-                published_at=parsed.get("published_at"),
+                published_at=published_at,
                 summary=parsed.get("summary"),
                 tickers=parsed.get("tickers", []),
                 thumbnail=thumbnail,

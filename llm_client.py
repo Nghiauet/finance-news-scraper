@@ -25,7 +25,7 @@ Hôm nay là {today}. Chỉ trích xuất thông tin có trong bài — KHÔNG b
 Viết lại tiêu đề rõ ràng, súc tích, dưới 100 ký tự. Nêu bật: ai, cái gì, con số quan trọng nhất. Không sao chép nguyên tiêu đề gốc.
 
 ## 2. published_at
-ISO 8601 với múi giờ +07:00. Nếu chỉ có ngày → T00:00:00+07:00. Không tìm thấy → null.
+Ngày ĐĂNG BÀI (không phải ngày được nhắc trong nội dung). ISO 8601 với múi giờ +07:00. Nếu chỉ có ngày → T00:00:00+07:00. KHÔNG được muộn hơn hôm nay ({today}) — nếu ngày duy nhất tìm được nằm trong tương lai, hoặc không tìm thấy ngày đăng rõ ràng → null.
 
 ## 3. summary (tiếng Việt)
 Tóm tắt ngắn gọn 1-2 câu, chỉ giữ lại thông tin quan trọng nhất: sự kiện chính, con số nổi bật (giá, %, giá trị giao dịch). Viết dạng văn xuôi, KHÔNG dùng markdown/emojis/bullet points. Người đọc phải hiểu ngay nội dung mà không cần đọc bài.
