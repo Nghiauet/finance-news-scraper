@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom"
+import { Routes, Route, Navigate } from "react-router-dom"
 import Layout from "./components/Layout"
 import AuthGuard from "./components/AuthGuard"
 import LoginPage from "./pages/LoginPage"
@@ -23,6 +23,8 @@ export default function App() {
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Route>
+      {/* Without this, an unknown /portal/* path matched nothing and rendered blank. */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
 }

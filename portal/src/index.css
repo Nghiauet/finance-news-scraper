@@ -1,1 +1,141 @@
 @import "tailwindcss";
+
+/* Dark mode is driven by a .dark class on <html> so the toggle can override the
+   OS preference. See lib/theme.ts. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Palette
+
+   Colour carries meaning here and nothing else: ok / warn / danger are reserved
+   for pipeline state, and `accent` is a separate hue used only for interaction,
+   so an indigo button can never be misread as a green "healthy" signal.
+   --------------------------------------------------------------------------- */
+
+:root {
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #eef1f6;
+  --line: #dfe4ec;
+  --line-strong: #c6cedb;
+
+  --fg: #111725;
+  --fg-muted: #58637a;
+  --fg-subtle: #8590a5;
+
+  --accent: #3b4fd8;
+  --accent-fg: #ffffff;
+  --accent-soft: #e8ebfd;
+
+  --ok: #0a7f47;
+  --ok-soft: #e2f4ea;
+  --warn: #a55a06;
+  --warn-soft: #fdf0dc;
+  --danger: #b62525;
+  --danger-soft: #fce9e9;
+
+  --shadow-card: 0 1px 2px rgb(17 23 37 / 0.05);
+}
+
+.dark {
+  --bg: #0b0f17;
+  --surface: #131a26;
+  --surface-2: #1b2432;
+  --line: #253044;
+  --line-strong: #35435c;
+
+  --fg: #e9edf5;
+  --fg-muted: #9aa6bc;
+  --fg-subtle: #6c7a91;
+
+  --accent: #8098ff;
+  --accent-fg: #0b0f17;
+  --accent-soft: #1e2947;
+
+  --ok: #3ddc97;
+  --ok-soft: #12301f;
+  --warn: #f5b544;
+  --warn-soft: #33260d;
+  --danger: #ff8080;
+  --danger-soft: #331919;
+
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-subtle: var(--fg-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono",
+    "Fira Code", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Every figure in this console is data — align it like data. */
+  .tnum {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum";
+  }
+
+  /* One visible focus treatment everywhere, including for keyboard users who
+     land on table rows and icon-only buttons. */
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--fg);
+  }
+}
+
+@layer utilities {
+  /* Skeletons and the "refreshing" pulse are the only motion in the app; both
+     stop for anyone who asked the OS to reduce motion. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+}

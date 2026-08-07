@@ -78,13 +78,14 @@ export function useSettings() {
   })
 }
 
+// Both endpoints return the full settings list, so write it straight into the
+// cache. Invalidating instead left a window where the form still showed the old
+// values while the refetch was in flight.
 export function useUpdateSettings() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (settings: Record<string, number>) => apiPut<any>("/admin/settings", settings),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["admin", "settings"] })
-    },
+    onSuccess: (resp) => qc.setQueryData(["admin", "settings"], resp),
   })
 }
 
@@ -92,9 +93,7 @@ export function useResetSettings() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiPost<any>("/admin/settings/reset"),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["admin", "settings"] })
-    },
+    onSuccess: (resp) => qc.setQueryData(["admin", "settings"], resp),
   })
 }
 

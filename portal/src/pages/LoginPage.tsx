@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react"
-import { useNavigate } from "react-router-dom"
+import { useNavigate, Navigate } from "react-router-dom"
+import { AlertTriangle, Loader2 } from "lucide-react"
 import { login, isAuthenticated } from "@/api/auth"
-import { Navigate } from "react-router-dom"
+import { Button, Field, inputClass } from "@/components/ui"
 
 export default function LoginPage() {
   const navigate = useNavigate()
@@ -29,19 +30,16 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+    <div className="flex min-h-screen items-center justify-center bg-bg p-4">
       <div className="w-full max-w-sm">
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
-          <div className="text-center mb-8">
-            <h1 className="text-2xl font-bold text-gray-900">News Portal</h1>
-            <p className="text-sm text-gray-500 mt-1">Sign in to continue</p>
-          </div>
+        <div className="mb-6">
+          <h1 className="text-xl font-semibold tracking-tight text-fg">News Pipeline</h1>
+          <p className="mt-1 text-sm text-muted">Operator console for the Vietnamese finance news scraper.</p>
+        </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
-                Username
-              </label>
+        <div className="rounded-xl border border-line bg-surface p-6 shadow-[var(--shadow-card)]">
+          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            <Field label="Username">
               <input
                 id="username"
                 type="text"
@@ -49,38 +47,38 @@ export default function LoginPage() {
                 onChange={(e) => setUsername(e.target.value)}
                 required
                 autoFocus
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                autoComplete="username"
+                className={inputClass}
                 placeholder="admin"
               />
-            </div>
+            </Field>
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Password
-              </label>
+            <Field label="Password">
               <input
                 id="password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                autoComplete="current-password"
+                className={inputClass}
               />
-            </div>
+            </Field>
 
             {error && (
-              <div className="bg-red-50 text-red-700 text-sm px-3 py-2 rounded-lg border border-red-200">
-                {error}
+              <div
+                role="alert"
+                className="flex items-start gap-2 rounded-lg border border-danger/40 bg-danger-soft px-3 py-2 text-sm text-danger"
+              >
+                <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden />
+                <span>{error}</span>
               </div>
             )}
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {loading ? "Signing in..." : "Sign In"}
-            </button>
+            <Button type="submit" variant="primary" disabled={loading} className="w-full justify-center">
+              {loading && <Loader2 size={14} className="animate-spin" aria-hidden />}
+              {loading ? "Signing in…" : "Sign in"}
+            </Button>
           </form>
         </div>
       </div>
