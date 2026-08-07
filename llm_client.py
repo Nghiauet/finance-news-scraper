@@ -17,6 +17,11 @@ log = logging.getLogger(__name__)
 
 _call_lock = threading.Lock()
 
+# Bounds for a single request when the caller supplied a deadline. Below the
+# minimum there's no point starting a call at all.
+_MIN_CALL_TIMEOUT = 15.0
+_MAX_CALL_TIMEOUT = 300.0
+
 _SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON song ngữ Việt-Anh với 9 trường sau.
 
 Hôm nay là {today}. Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm từ kiến thức bên ngoài.
@@ -155,9 +160,15 @@ def invalidate_active_client():
 # Core LLM function
 # ---------------------------------------------------------------------------
 
-def extract_and_summarize(text: str) -> Optional[dict]:
+def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Optional[dict]:
     """Extract title, published_at, and summary from article text via LLM.
-    Uses Redis cache. Returns dict or None on failure."""
+    Uses Redis cache. Returns dict or None on failure.
+
+    `deadline` is a time.monotonic() value. Attempts stop once it passes and each
+    request is capped at the time left, so a hung endpoint can't overrun the
+    caller's budget: a 300s client timeout retried 3x is 15 minutes per article,
+    which was enough for one source to consume an entire refresh cycle.
+    """
     import settings as settings_mod
 
     cached = cache_client.get_summary(text)
@@ -180,6 +191,17 @@ def extract_and_summarize(text: str) -> Optional[dict]:
     attempts = 3
     with _call_lock:
         for attempt in range(attempts):
+            # Don't start another attempt we have no time for. Checked inside the
+            # lock, since waiting for the lock itself can consume the budget.
+            if deadline is not None:
+                left = deadline - time.monotonic()
+                if left <= _MIN_CALL_TIMEOUT:
+                    log.warning("LLM deadline reached before attempt %d/%d — skipping article",
+                                attempt + 1, attempts)
+                    return None
+                call_timeout: Optional[float] = min(_MAX_CALL_TIMEOUT, left)
+            else:
+                call_timeout = None
             try:
                 t0 = time.monotonic()
                 resp = client.chat.completions.create(
@@ -191,6 +213,7 @@ def extract_and_summarize(text: str) -> Optional[dict]:
                     response_format={"type": "json_object"},
                     temperature=0.3,
                     max_tokens=max_output,
+                    **({"timeout": call_timeout} if call_timeout is not None else {}),
                 )
                 elapsed = time.monotonic() - t0
                 choice = resp.choices[0]

@@ -66,9 +66,9 @@ No per-source parsing logic. The LLM handles all extraction (title, date, summar
 ### Module roles
 
 - **`scrape.py`** — HTTP fetching, link extraction, page text extraction, CLI entrypoint. Exports `SOURCES` dict and `scrape_source()`.
-- **`api.py`** — FastAPI app with background hourly refresh loop. On startup, rebuilds news lists from cached articles via `rebuild_news_from_articles()`. News list endpoint interleaves sources round-robin.
+- **`api.py`** — FastAPI app with a background refresh loop every 30 min. On startup, rebuilds news lists from cached articles via `rebuild_news_from_articles()`. News list endpoint interleaves sources round-robin.
 - **`cache_client.py`** — Redis wrapper with graceful degradation (all operations no-op when Redis is unavailable). Three cache layers: article, LLM summary, news list.
-- **`llm_client.py`** — OpenAI-compatible client with threading lock for rate limiting, 2-attempt retry, and JSON response parsing with control character sanitization.
+- **`llm_client.py`** — OpenAI-compatible client with threading lock for rate limiting, 3-attempt retry, and JSON response parsing with control character sanitization.
 
 ### API endpoints
 

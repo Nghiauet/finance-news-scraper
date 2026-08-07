@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import redis
 from dotenv import load_dotenv
@@ -247,8 +248,15 @@ def get_llm_stats(recent_limit: int = 100, model_id: str | None = None) -> dict:
 # Model management  (keys: "models:list", "model:<id>", "models:active")
 # ---------------------------------------------------------------------------
 
-def _model_id(base_url: str, model_name: str) -> str:
-    return hashlib.sha256((base_url + model_name).encode()).hexdigest()[:12]
+def _new_model_id() -> str:
+    """Opaque unique id for a new model.
+
+    Deliberately NOT derived from the config. The old sha256(base_url +
+    model_name) scheme meant editing either field left the id no longer matching
+    its own contents, and adding a model with those original values then
+    collided with the edited one and silently overwrote its API key.
+    """
+    return uuid.uuid4().hex[:12]
 
 
 def list_models() -> list[dict]:
@@ -287,7 +295,7 @@ def add_model(config: dict) -> str | None:
     if r is None:
         return None
     try:
-        mid = _model_id(config["base_url"], config["model_name"])
+        mid = _new_model_id()
         pipe = r.pipeline()
         pipe.hset(f"model:{mid}", mapping={
             "name": config["name"],
@@ -296,7 +304,6 @@ def add_model(config: dict) -> str | None:
             "model_name": config["model_name"],
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
         })
-        pipe.lrem("models:list", 0, mid)
         pipe.rpush("models:list", mid)
         pipe.execute()
         return mid

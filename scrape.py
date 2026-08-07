@@ -243,7 +243,19 @@ SOURCES = {
 }
 
 
-def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> list[Article]:
+def scrape_source(
+    source_name: str,
+    limit: int = 3,
+    dry_run: bool = False,
+    deadline: Optional[float] = None,
+) -> list[Article]:
+    """Scrape one source, returning the articles gathered.
+
+    `deadline` is a time.monotonic() value after which no further article is
+    started. It exists because asyncio.wait_for cannot cancel a thread: without a
+    cooperative stop, a timed-out source kept scraping in the background and went
+    on competing for the LLM lock, slowing every later cycle.
+    """
     source = SOURCES[source_name]
     domain = source["domain"]
     weak_ssl = source.get("weak_ssl", False)
@@ -259,6 +271,10 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
 
     results = []
     for i, meta in enumerate(articles_meta[:limit]):
+        if deadline is not None and time.monotonic() >= deadline:
+            log.warning("[%s] budget spent — stopping with %d/%d articles",
+                        source_name, len(results), min(limit, len(articles_meta)))
+            break
         url = meta["url"]
         n = f"{i + 1}/{limit}"
         log.info("[%s] [%s] %s", source_name, n, meta["title"][:70])
@@ -295,7 +311,7 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
             continue
 
         now = time.strftime("%Y-%m-%dT%H:%M:%S+07:00")
-        parsed = extract_and_summarize(page_text)
+        parsed = extract_and_summarize(page_text, deadline=deadline)
         if parsed:
             # Prefer the source's authoritative date over the LLM's guess, then
             # drop it if it's in the future (LLM mis-extraction).
@@ -329,9 +345,10 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
         else:
             log.warning("[%s] [%s] LLM failed — skipping", source_name, n)
 
-        # Update news list incrementally so articles are visible immediately
+        # Publish progress so new articles are visible immediately, without
+        # temporarily hiding the ones already cached.
         if results and not dry_run:
-            _flush_news(source_name, results)
+            _flush_news(source_name, results, merge=True)
 
     log.info("[%s] finished: %d/%d articles in %.1fs", source_name, len(results), limit, time.monotonic() - t_source)
 
@@ -341,8 +358,19 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
     return results
 
 
-def _flush_news(source_name: str, results: list[Article]) -> None:
-    """Write current results to the news:<source> cache list."""
+def _flush_news(source_name: str, results: list[Article], *, merge: bool = False) -> None:
+    """Write results to the news:<source> cache list.
+
+    merge=True unions the results with whatever is already cached (deduped by
+    URL, fresh entries winning). Used for the incremental in-loop flush: a plain
+    replace dropped the source to a single article and let it climb back over
+    several minutes, so anything polling the API mid-refresh saw a nearly-empty
+    source.
+
+    merge=False replaces the list outright. Used for the final flush so the
+    cache ends up authoritative and bounded — articles that fell off the
+    source's front page are dropped instead of lingering until the key expires.
+    """
     payload = [
         {
             "title": a.title,
@@ -361,6 +389,12 @@ def _flush_news(source_name: str, results: list[Article]) -> None:
         }
         for a in results
     ]
+    if merge:
+        fresh_urls = {item["url"] for item in payload}
+        payload += [
+            old for old in cache_client.get_news(source_name)
+            if old.get("url") not in fresh_urls
+        ]
     cache_client.set_news(source_name, payload)
 
 
