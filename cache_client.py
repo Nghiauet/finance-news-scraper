@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import redis
 from dotenv import load_dotenv
@@ -85,6 +86,10 @@ def set_article(
     thumbnail: dict | None = None,
     content: str | None = None,
     is_relevant: bool = True,
+    *,
+    title_en: str | None = None,
+    summary_en: str | None = None,
+    content_en: str | None = None,
 ) -> None:
     r = _get_client()
     if r is None:
@@ -99,6 +104,9 @@ def set_article(
                 "thumbnail": thumbnail,
                 "content": content,
                 "is_relevant": is_relevant,
+                "title_en": title_en,
+                "summary_en": summary_en,
+                "content_en": content_en,
                 "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
             },
             ensure_ascii=False,
@@ -240,8 +248,15 @@ def get_llm_stats(recent_limit: int = 100, model_id: str | None = None) -> dict:
 # Model management  (keys: "models:list", "model:<id>", "models:active")
 # ---------------------------------------------------------------------------
 
-def _model_id(base_url: str, model_name: str) -> str:
-    return hashlib.sha256((base_url + model_name).encode()).hexdigest()[:12]
+def _new_model_id() -> str:
+    """Opaque unique id for a new model.
+
+    Deliberately NOT derived from the config. The old sha256(base_url +
+    model_name) scheme meant editing either field left the id no longer matching
+    its own contents, and adding a model with those original values then
+    collided with the edited one and silently overwrote its API key.
+    """
+    return uuid.uuid4().hex[:12]
 
 
 def list_models() -> list[dict]:
@@ -280,7 +295,7 @@ def add_model(config: dict) -> str | None:
     if r is None:
         return None
     try:
-        mid = _model_id(config["base_url"], config["model_name"])
+        mid = _new_model_id()
         pipe = r.pipeline()
         pipe.hset(f"model:{mid}", mapping={
             "name": config["name"],
@@ -289,7 +304,6 @@ def add_model(config: dict) -> str | None:
             "model_name": config["model_name"],
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
         })
-        pipe.lrem("models:list", 0, mid)
         pipe.rpush("models:list", mid)
         pipe.execute()
         return mid
@@ -353,6 +367,95 @@ def set_active_model(model_id: str) -> bool:
         return False
 
 
+def mark_model_dead(model_id: str, reason: str) -> None:
+    """Flag a model as permanently failing so failover stops retrying it.
+
+    Written on a 401/403/404/410 — the statuses that mean the model is gone for
+    this account rather than briefly unwell. The timestamp lets the caller
+    re-test it after a cooldown, since an expired key can be fixed without
+    anything in the registry changing.
+    """
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.hset(f"model:{model_id}", mapping={
+            "health": "dead",
+            "health_reason": (reason or "")[:300],
+            "health_checked_at": str(int(time.time())),
+        })
+    except Exception:
+        pass
+
+
+def clear_model_health(model_id: str) -> None:
+    """Drop the dead mark — the model answered, or an operator edited it."""
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.hdel(f"model:{model_id}", "health", "health_reason", "health_checked_at")
+    except Exception:
+        pass
+
+
+def model_dead_since(model_id: str) -> int | None:
+    """Unix ts the model was marked dead, or None if it is not marked."""
+    r = _get_client()
+    if r is None:
+        return None
+    try:
+        data = r.hmget(f"model:{model_id}", "health", "health_checked_at")
+        if not data or data[0] != "dead":
+            return None
+        return int(data[1] or 0)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Short-lived locks / flags  (SET NX EX)
+# ---------------------------------------------------------------------------
+
+def acquire_lock(name: str, ttl_s: int) -> bool:
+    """Take a named lock, or return False if it is already held.
+
+    Used to keep the API and a concurrently running `scrape.py` from probing
+    every model at the same moment, and to hold a back-off window after a
+    failover sweep finds nothing alive. Redis being unavailable returns True:
+    caching degrades gracefully everywhere else, so a missing lock must not be
+    the thing that blocks a failover.
+    """
+    r = _get_client()
+    if r is None:
+        return True
+    try:
+        return bool(r.set(f"lock:{name}", "1", nx=True, ex=max(1, ttl_s)))
+    except Exception:
+        return True
+
+
+def lock_held(name: str) -> bool:
+    """True while a lock/flag window is still active."""
+    r = _get_client()
+    if r is None:
+        return False
+    try:
+        return bool(r.exists(f"lock:{name}"))
+    except Exception:
+        return False
+
+
+def release_lock(name: str) -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.delete(f"lock:{name}")
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Cron run tracking  (key: "cron:runs" list, bounded to 100)
 # ---------------------------------------------------------------------------
@@ -387,6 +490,43 @@ def record_cron_run(
         pipe.execute()
     except Exception:
         pass
+
+
+def bump_zero_article_streak() -> int:
+    """Count consecutive refresh cycles that stored nothing; returns the streak.
+
+    A cycle can report every source "ok" and still store zero articles — the
+    sources answered and extraction failed afterwards. That combination hid a
+    retired LLM model for 18 days, so the streak is tracked explicitly instead
+    of being inferred from the run history.
+    """
+    r = _get_client()
+    if r is None:
+        return 0
+    try:
+        return int(r.incr("cron:zero_streak"))
+    except Exception:
+        return 0
+
+
+def clear_zero_article_streak() -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.delete("cron:zero_streak")
+    except Exception:
+        pass
+
+
+def get_zero_article_streak() -> int:
+    r = _get_client()
+    if r is None:
+        return 0
+    try:
+        return int(r.get("cron:zero_streak") or 0)
+    except Exception:
+        return 0
 
 
 def get_cron_runs(limit: int = 50) -> list[dict]:

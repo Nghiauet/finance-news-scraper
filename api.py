@@ -52,19 +52,54 @@ def _make_id(url: str) -> str:
     return str(digest % (10 ** 18))
 
 
-def _normalize_article(raw: dict) -> dict:
+def _resolve_article(raw: dict, language: str) -> Optional[dict]:
+    """Pick title/summary/content for the requested language. Returns None if
+    the article lacks a translation in the requested language so the caller
+    can skip it (e.g. EN requested but only VI extracted so far).
+
+    language="all" returns every available field (both VI and EN) raw — used
+    by downstream ingestion services that want to cache both languages in one
+    upstream call."""
     url = raw.get("url", "")
+    if language == "all":
+        return {
+            "id": _make_id(url),
+            "title": raw.get("title", ""),
+            "title_en": raw.get("title_en"),
+            "url": url,
+            "source": raw.get("source", ""),
+            "published_at": raw.get("published_at"),
+            "summary": raw.get("summary"),
+            "summary_en": raw.get("summary_en"),
+            "tickers": raw.get("tickers", []),
+            "thumbnail": raw.get("thumbnail"),
+            "content": raw.get("content"),
+            "content_en": raw.get("content_en"),
+            "scraped_at": raw.get("scraped_at"),
+            "language": "all",
+        }
+    if language == "en":
+        title = raw.get("title_en")
+        if not title:
+            return None
+        summary = raw.get("summary_en")
+        content = raw.get("content_en")
+    else:
+        title = raw.get("title", "")
+        summary = raw.get("summary")
+        content = raw.get("content")
     return {
         "id": _make_id(url),
-        "title": raw.get("title", ""),
+        "title": title,
         "url": url,
         "source": raw.get("source", ""),
         "published_at": raw.get("published_at"),
-        "summary": raw.get("summary"),
+        "summary": summary,
         "tickers": raw.get("tickers", []),
         "thumbnail": raw.get("thumbnail"),
-        "content": raw.get("content"),
+        "content": content,
         "scraped_at": raw.get("scraped_at"),
+        "language": language,
     }
 
 
@@ -90,6 +125,10 @@ class ArticleItem(BaseModel):
     thumbnail: Optional[Thumbnail] = None
     content: Optional[str] = None
     scraped_at: Optional[str] = None
+    language: str = "vi"
+    title_en: Optional[str] = None
+    summary_en: Optional[str] = None
+    content_en: Optional[str] = None
 
 
 class Pagination(BaseModel):
@@ -123,6 +162,23 @@ class NewsDetailResponse(BaseModel):
 
 _refresh_running = False
 
+# Floor for a source's time slice, and the slack allowed for an in-flight LLM
+# call to unwind after the cooperative deadline passes.
+_MIN_SOURCE_BUDGET = 60.0
+_SOURCE_GRACE = 30.0
+
+# asyncio holds only a weak reference to a running task, so a bare
+# create_task() can be garbage-collected mid-run. Keep a strong reference
+# until the task finishes.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> None:
+    """Fire-and-forget a coroutine while holding a reference to its task."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 async def _refresh_all():
     global _refresh_running
@@ -136,6 +192,31 @@ async def _refresh_all():
         _refresh_running = False
 
 
+def _finish_cycle(started_at: float, duration: float, total: int, ok: int,
+                  articles_total: int, timed_out: bool, note: str = "") -> None:
+    """Record the cycle and alert when it produced nothing.
+
+    A cycle can report every source "ok" and still store zero articles: the
+    sources answered and extraction failed afterwards. Nothing used to notice
+    that combination, which is why a retired LLM model sat unfixed for 18 days
+    while the dashboard showed 13/13 green.
+    """
+    cache_client.record_cron_run(started_at, duration, total, ok, articles_total, timed_out)
+    if articles_total > 0:
+        cache_client.clear_zero_article_streak()
+        return
+    streak = cache_client.bump_zero_article_streak()
+    detail = f" — {note}" if note else ""
+    log.error("[CRON] ALERT: cycle stored 0 articles (%d/%d sources reported ok), "
+              "%d cycle(s) in a row%s", ok, total, streak, detail)
+    cache_client.record_error(
+        "cron",
+        f"Refresh stored 0 articles ({ok}/{total} sources reported ok) — "
+        f"{streak} consecutive empty cycle(s){detail}. The pipeline is producing "
+        f"nothing: check LLM model health at /admin/llm.",
+    )
+
+
 async def _do_refresh():
     sources = list(SOURCES)
     total = len(sources)
@@ -144,6 +225,23 @@ async def _do_refresh():
     refresh_timeout = settings_mod.get_setting("refresh_timeout")
     articles_per = settings_mod.get_setting("articles_per_source")
     log.info("[CRON] refresh started — %d sources, timeout %ds", total, refresh_timeout)
+    # One cheap ping before fanning out to 13 sources: a retired model then
+    # costs a single request instead of the entire refresh budget, and the
+    # failover happens before any article is attempted.
+    health = llm_client.ensure_healthy_active_model()
+    if health.get("switched"):
+        log.warning("[CRON] active model was gone — failed over to %s", health.get("model"))
+    if health.get("dead") and not health.get("switched"):
+        duration = time.monotonic() - t_all
+        log.error("[CRON] no healthy LLM model — skipping cycle: %s", health.get("detail"))
+        _finish_cycle(started_at, duration, total, 0, 0, False,
+                      note=f"no healthy LLM model ({health.get('detail', '')})")
+        return
+    if not health.get("ok"):
+        # Transient ping failure: proceed, per-article retries will cope.
+        log.warning("[CRON] model ping failed but looks transient — continuing: %s",
+                    health.get("detail"))
+
     ok = 0
     articles_total = 0
     timed_out = False
@@ -158,39 +256,39 @@ async def _do_refresh():
         t_src = time.monotonic()
         log.info("[CRON] [%d/%d] %s — starting", idx, total, source_name)
         try:
-            remaining = refresh_timeout - elapsed
+            # Split the time that's left evenly across the sources still to come.
+            # Handing source #1 the whole remaining budget meant a slow model let
+            # cafef spend all 1800s while the other 12 were never attempted, so
+            # every cycle reported 0/13. A fair slice makes partial progress on
+            # every source instead, and the incremental flush keeps it.
+            per_source = max(_MIN_SOURCE_BUDGET, (refresh_timeout - elapsed) / (total - idx + 1))
+            deadline = time.monotonic() + per_source
             articles = await asyncio.wait_for(
-                asyncio.to_thread(scrape_source, source_name, articles_per),
-                timeout=remaining,
+                asyncio.to_thread(scrape_source, source_name, articles_per, False, deadline),
+                # scrape_source stops itself at the deadline; this only catches a
+                # thread wedged in a syscall, since wait_for cannot cancel it.
+                timeout=per_source + _SOURCE_GRACE,
             )
-            payload = [
-                {
-                    "title": a.title,
-                    "url": a.url,
-                    "source": a.source,
-                    "published_at": a.published_at,
-                    "summary": a.summary,
-                    "tickers": a.tickers,
-                    "thumbnail": a.thumbnail,
-                    "content": a.content,
-                    "is_relevant": a.is_relevant,
-                    "scraped_at": a.scraped_at,
-                }
-                for a in articles
-            ]
-            cache_client.set_news(source_name, payload)
+            # scrape_source owns the news:<source> write (incrementally during
+            # the run, then authoritatively at the end). Re-writing it here
+            # duplicated that work and, when a run produced nothing, replaced the
+            # cached list with an empty one — wiping a whole source on a
+            # transient fetch or LLM failure.
             ok += 1
-            articles_total += len(payload)
+            articles_total += len(articles)
             log.info("[CRON] [%d/%d] %s — stored %d articles in %.1fs",
-                     idx, total, source_name, len(payload), time.monotonic() - t_src)
+                     idx, total, source_name, len(articles), time.monotonic() - t_src)
         except asyncio.TimeoutError:
-            log.warning("[CRON] [%d/%d] %s — timed out (refresh timeout reached)", idx, total, source_name)
-            cache_client.record_error("cron", f"Source timeout: {source_name}", source=source_name)
+            log.warning("[CRON] [%d/%d] %s — spent its %.0fs slice, moving on",
+                        idx, total, source_name, per_source)
+            cache_client.record_error(
+                "cron", f"{source_name} used its full {per_source:.0f}s slice", source=source_name,
+            )
         except Exception as e:
             log.error("[CRON] [%d/%d] %s — failed: %s", idx, total, source_name, e)
             cache_client.record_error("scrape", str(e), source=source_name)
     duration = time.monotonic() - t_all
-    cache_client.record_cron_run(started_at, duration, total, ok, articles_total, timed_out)
+    _finish_cycle(started_at, duration, total, ok, articles_total, timed_out)
     log.info("[CRON] refresh done — %d/%d sources ok in %.1fs", ok, total, duration)
 
 
@@ -230,7 +328,10 @@ app.add_middleware(
 
 @app.exception_handler(HTTPException)
 async def _http_exception_handler(request: Request, exc: HTTPException):
-    code_map = {401: "UNAUTHORIZED", 404: "NOT_FOUND", 422: "VALIDATION_ERROR", 400: "BAD_REQUEST"}
+    code_map = {
+        400: "BAD_REQUEST", 401: "UNAUTHORIZED", 404: "NOT_FOUND",
+        409: "CONFLICT", 422: "VALIDATION_ERROR",
+    }
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -256,6 +357,11 @@ def get_news(
     cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
     sort: Optional[str] = Query(default="newest", description="Sort: newest, oldest, recent (by scrape time)."),
     q: Optional[str] = Query(default=None, description="Search query (title, summary, tickers)."),
+    language: str = Query(
+        default="vi",
+        description="Response language: 'vi' (default) or 'en'.",
+        pattern="^(vi|en|all)$",
+    ),
 ):
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
@@ -277,7 +383,13 @@ def get_news(
             for article in [bucket[i]]
         ]
 
-    normalized = [_normalize_article(a) for a in raw_articles if a.get("is_relevant", True)]
+    normalized = [
+        art
+        for a in raw_articles
+        if a.get("is_relevant", True)
+        for art in [_resolve_article(a, language)]
+        if art is not None
+    ]
 
     seen_titles: set[str] = set()
     deduped = []
@@ -314,10 +426,19 @@ def get_news(
 
     start = 0
     if cursor:
-        for i, item in enumerate(normalized):
-            if item["id"] == cursor:
-                start = i + 1
-                break
+        cursor_idx = next((i for i, item in enumerate(normalized) if item["id"] == cursor), None)
+        if cursor_idx is None:
+            # The cursor's article left the list (cron refresh, TTL expiry, or a
+            # changed filter). Falling through with start=0 re-served page 1, so a
+            # paginating client re-ingested the same articles instead of
+            # finishing. End the sequence; the next pass starts from fresh data.
+            log.warning("Stale /news cursor %r — ending pagination", cursor)
+            return NewsListResponse(
+                data=[],
+                pagination=Pagination(next_cursor=None, has_more=False, limit=limit, total=total),
+                meta=Meta(request_id=request_id, took_ms=int((time.monotonic() - t0) * 1000)),
+            )
+        start = cursor_idx + 1
 
     page = normalized[start: start + limit]
     has_more = (start + limit) < total
@@ -334,14 +455,26 @@ def get_news(
 
 
 @app.get("/news/{article_id}", response_model=NewsDetailResponse)
-def get_news_detail(article_id: str):
+def get_news_detail(
+    article_id: str,
+    language: str = Query(
+        default="vi",
+        description="Response language: 'vi' (default) or 'en'.",
+        pattern="^(vi|en|all)$",
+    ),
+):
     t0 = time.monotonic()
     request_id = f"req_{uuid.uuid4().hex[:12]}"
 
     for name in SOURCES:
         for raw in cache_client.get_news(name):
             if _make_id(raw.get("url", "")) == article_id and raw.get("is_relevant", True):
-                article = _normalize_article(raw)
+                article = _resolve_article(raw, language)
+                if article is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Article '{article_id}' not available in language '{language}'.",
+                    )
                 took_ms = int((time.monotonic() - t0) * 1000)
                 return NewsDetailResponse(
                     data=ArticleItem(**article),
@@ -394,10 +527,28 @@ def _mask_api_key(key: str) -> str:
     return "*" * (len(key) - 4) + key[-4:]
 
 
+def _find_model_by_target(base_url: str, model_name: str, exclude_id: str | None = None) -> Optional[dict]:
+    """Return an existing model aimed at the same base_url + model_name, if any.
+
+    Model ids used to be a hash of exactly these two fields, so adding a
+    duplicate silently overwrote the original (including its API key). Ids are
+    opaque now, so the collision is reported instead of applied.
+    """
+    for m in cache_client.list_models():
+        if m["id"] == exclude_id:
+            continue
+        if m.get("base_url") == base_url and m.get("model_name") == model_name:
+            return m
+    return None
+
+
 def _enrich_models(models: list[dict], active_id: str | None) -> list[dict]:
     """Annotate models with is_active flag, per-model stats, and masked API keys."""
     for m in models:
         m["is_active"] = m["id"] == active_id
+        # "ok" unless failover marked it dead, so the portal can show at a glance
+        # which models are retired rather than only which one is active.
+        m["health"] = m.get("health") or "ok"
         model_stats = cache_client.get_llm_stats(recent_limit=0, model_id=m["id"])
         m["stats"] = model_stats.get("totals", {})
         if "api_key" in m:
@@ -471,7 +622,11 @@ def admin_cache(_user: str = Depends(require_admin)):
 def admin_cron(_user: str = Depends(require_admin)):
     t0 = time.monotonic()
     runs = cache_client.get_cron_runs(limit=50)
-    return {"success": True, "data": {"runs": runs}, "meta": _admin_meta(t0)}
+    return {
+        "success": True,
+        "data": {"runs": runs, "zero_article_streak": cache_client.get_zero_article_streak()},
+        "meta": _admin_meta(t0),
+    }
 
 
 @app.get("/admin/errors")
@@ -490,7 +645,7 @@ async def admin_refresh_all(_user: str = Depends(require_admin)):
     t0 = time.monotonic()
     if _refresh_running:
         raise HTTPException(status_code=409, detail="A refresh is already running")
-    asyncio.create_task(_refresh_all())
+    _spawn(_refresh_all())
     return {"success": True, "data": {"message": "Refresh started"}, "meta": _admin_meta(t0)}
 
 
@@ -508,7 +663,7 @@ async def admin_purge(_user: str = Depends(require_admin)):
     counts = cache_client.purge_all_cache()
     log.info("[PURGE] Deleted %d articles, %d summaries, %d news lists",
              counts["articles"], counts["summaries"], counts["news"])
-    asyncio.create_task(_refresh_all())
+    _spawn(_refresh_all())
     return {
         "success": True,
         "data": {"purged": counts, "message": "Cache purged, rescrape started"},
@@ -533,14 +688,19 @@ def admin_get_settings(_user: str = Depends(require_admin)):
 @app.put("/admin/settings")
 def admin_update_settings(body: dict, _user: str = Depends(require_admin)):
     t0 = time.monotonic()
+    # Validate the whole batch before writing any of it — applying settings one
+    # by one and then raising left the caller with a 400 and no way to tell which
+    # values had already taken effect.
     errors = []
     for name, value in body.items():
         try:
-            settings_mod.set_setting(name, value)
+            settings_mod.validate_setting(name, value)
         except (ValueError, TypeError) as e:
             errors.append(f"{name}: {e}")
     if errors:
         raise HTTPException(status_code=400, detail="; ".join(errors))
+    for name, value in body.items():
+        settings_mod.set_setting(name, value)
     return {
         "success": True,
         "data": settings_mod.get_all_settings(),
@@ -589,6 +749,13 @@ def admin_list_models(_user: str = Depends(require_admin)):
 @app.post("/admin/models")
 def admin_add_model(body: ModelCreate, _user: str = Depends(require_admin)):
     t0 = time.monotonic()
+    dup = _find_model_by_target(body.base_url, body.model_name)
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{dup.get('name')}' already targets '{body.model_name}' "
+                   f"at {body.base_url} — edit that one instead",
+        )
     model_id = cache_client.add_model({
         "name": body.name,
         "base_url": body.base_url,
@@ -608,12 +775,39 @@ def admin_add_model(body: ModelCreate, _user: str = Depends(require_admin)):
 @app.put("/admin/models/{model_id}")
 def admin_update_model(model_id: str, body: ModelUpdate, _user: str = Depends(require_admin)):
     t0 = time.monotonic()
-    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    # Omitted or blank fields mean "leave unchanged" — never overwrite a stored
+    # value with an empty one.
+    updates = {
+        k: v.strip() for k, v in body.model_dump().items()
+        if isinstance(v, str) and v.strip()
+    }
+    # Read endpoints return the key masked; ignore a mask echoed back so editing
+    # another field cannot replace the real key with asterisks.
+    if updates.get("api_key", "").startswith("*"):
+        del updates["api_key"]
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
+    current = cache_client.get_model_config(model_id)
+    if not current:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    # Editing base_url/model_name must not land on another model's target either.
+    dup = _find_model_by_target(
+        updates.get("base_url", current.get("base_url", "")),
+        updates.get("model_name", current.get("model_name", "")),
+        exclude_id=model_id,
+    )
+    if dup:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Model '{dup.get('name')}' already targets that base_url + model_name",
+        )
     ok = cache_client.update_model(model_id, updates)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    # An edit is how a dead model gets fixed (rotated key, renamed model), so the
+    # dead mark must not outlive the fix and keep failover skipping it.
+    cache_client.clear_model_health(model_id)
+    cache_client.release_lock("failover:all_dead")
     llm_client.invalidate_active_client()
     config = cache_client.get_model_config(model_id)
     if config and "api_key" in config:
@@ -638,6 +832,11 @@ def admin_activate_model(model_id: str, _user: str = Depends(require_admin)):
     if not config:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     cache_client.set_active_model(model_id)
+    # Activating by hand is an operator saying "use this one" — drop any dead
+    # mark and the all-dead back-off so the choice takes effect immediately
+    # instead of being skipped by failover's cooldown.
+    cache_client.clear_model_health(model_id)
+    cache_client.release_lock("failover:all_dead")
     llm_client.invalidate_active_client()
     return {"success": True, "data": {"active_model_id": model_id}, "meta": _admin_meta(t0)}
 
@@ -662,6 +861,7 @@ async def admin_preview_source(
     limit: int = Query(default=5, ge=1, le=10),
     _user: str = Depends(require_admin),
 ):
+    t0 = time.monotonic()
     if source_name not in SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown source '{source_name}'")
     articles = await asyncio.wait_for(
@@ -671,7 +871,7 @@ async def admin_preview_source(
     payload = [asdict(a) for a in articles]
     for item in payload:
         item["id"] = _make_id(item["url"])
-    return {"success": True, "data": payload, "meta": _admin_meta(time.monotonic())}
+    return {"success": True, "data": payload, "meta": _admin_meta(t0)}
 
 
 @app.post("/admin/refresh/{source_name}")
@@ -679,6 +879,7 @@ async def admin_refresh_source(
     source_name: str,
     _user: str = Depends(require_admin),
 ):
+    t0 = time.monotonic()
     if source_name not in SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown source '{source_name}'")
     articles_per = settings_mod.get_setting("articles_per_source")
@@ -686,7 +887,7 @@ async def admin_refresh_source(
         asyncio.to_thread(scrape_source, source_name, articles_per),
         timeout=600,
     )
-    return {"success": True, "data": {"count": len(articles), "source": source_name}, "meta": _admin_meta(time.monotonic())}
+    return {"success": True, "data": {"count": len(articles), "source": source_name}, "meta": _admin_meta(t0)}
 
 
 # ---------------------------------------------------------------------------

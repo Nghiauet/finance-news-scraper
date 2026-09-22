@@ -35,25 +35,36 @@ export function useAdminCache() {
   })
 }
 
-export function useNewsList(source?: string, limit = 20, cursor?: string, sort = "newest", q?: string) {
+export type Language = "vi" | "en"
+
+export function useNewsList(
+  source?: string,
+  limit = 20,
+  cursor?: string,
+  sort = "newest",
+  q?: string,
+  language: Language = "vi",
+) {
   const params = new URLSearchParams()
   if (source) params.set("source", source)
   params.set("limit", String(limit))
   if (cursor) params.set("cursor", cursor)
   if (sort) params.set("sort", sort)
   if (q) params.set("q", q)
+  if (language && language !== "vi") params.set("language", language)
   const qs = params.toString()
 
   return useQuery({
-    queryKey: ["news", source, limit, cursor, sort, q],
+    queryKey: ["news", source, limit, cursor, sort, q, language],
     queryFn: () => apiFetch<any>(`/news?${qs}`),
   })
 }
 
-export function useNewsDetail(id: string) {
+export function useNewsDetail(id: string, language: Language = "vi") {
+  const qs = language !== "vi" ? `?language=${language}` : ""
   return useQuery({
-    queryKey: ["news", id],
-    queryFn: () => apiFetch<any>(`/news/${id}`),
+    queryKey: ["news", id, language],
+    queryFn: () => apiFetch<any>(`/news/${id}${qs}`),
     enabled: !!id,
   })
 }
@@ -67,13 +78,14 @@ export function useSettings() {
   })
 }
 
+// Both endpoints return the full settings list, so write it straight into the
+// cache. Invalidating instead left a window where the form still showed the old
+// values while the refetch was in flight.
 export function useUpdateSettings() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (settings: Record<string, number>) => apiPut<any>("/admin/settings", settings),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["admin", "settings"] })
-    },
+    onSuccess: (resp) => qc.setQueryData(["admin", "settings"], resp),
   })
 }
 
@@ -81,9 +93,7 @@ export function useResetSettings() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () => apiPost<any>("/admin/settings/reset"),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["admin", "settings"] })
-    },
+    onSuccess: (resp) => qc.setQueryData(["admin", "settings"], resp),
   })
 }
 

@@ -1,310 +1,394 @@
-import { useState, useEffect } from "react"
+import { useEffect, useState } from "react"
 import { Link } from "react-router-dom"
 import {
-  Search, X, Eye, RefreshCw, ChevronDown, ChevronRight,
-  CheckCircle, XCircle,
+  Search, X, Eye, RefreshCw, ChevronDown, ChevronRight, ChevronLeft,
+  Loader2, ExternalLink,
 } from "lucide-react"
 import {
   useNewsList, useAdminSources, usePreviewScrape, useRefreshSource,
+  type Language,
 } from "@/api/hooks"
+import { useToast } from "@/lib/toast-context"
+import {
+  Card, CardHeader, PageHeader, ErrorState, EmptyState, Button, Badge,
+  IconButton, Field, inputClass, SkeletonRows, TableScroll, thClass, tdClass,
+} from "@/components/ui"
+
+const PAGE_SIZE = 20
+
+const selectClass =
+  "rounded-lg border border-line bg-surface px-2.5 py-1.5 text-sm text-fg focus:border-accent focus:outline-none"
 
 export default function NewsPage() {
-  const [source, setSource] = useState<string>("")
-  const [cursor, setCursor] = useState<string | undefined>()
-  const [sort, setSort] = useState<string>("newest")
+  const [source, setSource] = useState("")
+  const [sort, setSort] = useState("newest")
   const [searchInput, setSearchInput] = useState("")
   const [q, setQ] = useState<string | undefined>()
+  const [language, setLanguage] = useState<Language>(
+    () => (localStorage.getItem("news.language") as Language) || "vi",
+  )
+
+  // The API paginates forward only, so remember the cursor for each page to make
+  // Previous possible. Index 0 is the first page (no cursor).
+  const [cursors, setCursors] = useState<(string | undefined)[]>([undefined])
+  const [page, setPage] = useState(0)
+
   const [showPreview, setShowPreview] = useState(false)
   const [previewSource, setPreviewSource] = useState("")
   const [previewLimit, setPreviewLimit] = useState(5)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
+  const toast = useToast()
   const { data: sourcesData } = useAdminSources()
-  const { data, isLoading, error } = useNewsList(source || undefined, 20, cursor, sort, q)
+  const { data, isLoading, isFetching, error, refetch } = useNewsList(
+    source || undefined, PAGE_SIZE, cursors[page], sort, q, language,
+  )
   const previewMut = usePreviewScrape()
   const refreshMut = useRefreshSource()
 
-  const sources: any[] = sourcesData?.data || []
+  const sources: { name: string; domain: string }[] = sourcesData?.data || []
   const articles: any[] = data?.data || []
   const pagination = data?.pagination
   const previewArticles: any[] = previewMut.data?.data || []
 
-  // Debounce search input
+  function resetPaging() {
+    setCursors([undefined])
+    setPage(0)
+  }
+
+  // Debounce the search box, and restart paging whenever the query changes.
   useEffect(() => {
     const timer = setTimeout(() => {
-      const trimmed = searchInput.trim()
-      setQ(trimmed || undefined)
-      setCursor(undefined)
+      setQ(searchInput.trim() || undefined)
+      resetPaging()
     }, 400)
     return () => clearTimeout(timer)
   }, [searchInput])
+
+  function goNext() {
+    const next = pagination?.next_cursor
+    if (!next) return
+    setCursors((prev) => {
+      const copy = prev.slice(0, page + 1)
+      copy.push(next)
+      return copy
+    })
+    setPage((p) => p + 1)
+  }
 
   function resetFilters() {
     setSource("")
     setSort("newest")
     setSearchInput("")
     setQ(undefined)
-    setCursor(undefined)
+    resetPaging()
   }
 
   function handlePreview() {
     if (!previewSource) return
-    previewMut.mutate({ source: previewSource, limit: previewLimit })
     setExpanded(new Set())
+    previewMut.mutate(
+      { source: previewSource, limit: previewLimit },
+      {
+        onSuccess: (resp) => {
+          const n = resp?.data?.length ?? 0
+          if (n === 0) toast.warn(`${previewSource} returned no articles. Its page layout may have changed.`)
+          else toast.success(`Previewed ${n} article${n === 1 ? "" : "s"} from ${previewSource}. Nothing was cached.`)
+        },
+        onError: (err) => toast.error((err as Error).message),
+      },
+    )
   }
 
-  function handleRefresh() {
+  function handleRefreshSource() {
     if (!previewSource) return
-    if (!confirm(`Refresh "${previewSource}"? This will scrape and write to cache.`)) return
-    refreshMut.mutate(previewSource)
+    if (!confirm(`Scrape "${previewSource}" and write the results to the cache?`)) return
+    refreshMut.mutate(previewSource, {
+      onSuccess: (resp) => toast.success(`${previewSource}: ${resp?.data?.count ?? 0} articles cached.`),
+      onError: (err) => toast.error((err as Error).message),
+    })
   }
 
   function toggleExpand(idx: number) {
-    const next = new Set(expanded)
-    if (next.has(idx)) next.delete(idx)
-    else next.add(idx)
-    setExpanded(next)
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(idx)) next.delete(idx)
+      else next.add(idx)
+      return next
+    })
   }
+
+  const total = pagination?.total ?? 0
+  const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1
+  const rangeEnd = page * PAGE_SIZE + articles.length
+  const filtered = !!q || !!source || sort !== "newest"
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-gray-800">News</h2>
-        <div className="flex items-center gap-2">
-          {/* Preview toggle */}
-          <button
-            onClick={() => setShowPreview(!showPreview)}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-lg transition-colors ${
-              showPreview ? "bg-blue-50 border-blue-300 text-blue-700" : "border-gray-300 hover:bg-gray-50"
-            }`}
-          >
-            <Eye size={14} />
-            Preview
-          </button>
+      <PageHeader title="News" hint="Articles currently served by the API.">
+        <Button onClick={() => setShowPreview((v) => !v)} variant={showPreview ? "primary" : "secondary"}>
+          <Eye size={14} aria-hidden /> Preview a source
+        </Button>
+      </PageHeader>
 
-          {/* Search */}
-          <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              placeholder="Search title, ticker..."
-              className="pl-8 pr-8 py-1.5 border border-gray-300 rounded-lg text-sm bg-white w-56 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-            />
-            {searchInput && (
-              <button onClick={() => setSearchInput("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
-                <X size={14} />
-              </button>
-            )}
-          </div>
-
-          {/* Sort */}
-          <select
-            value={sort}
-            onChange={(e) => { setSort(e.target.value); setCursor(undefined) }}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white"
-          >
-            <option value="newest">Newest published</option>
-            <option value="oldest">Oldest published</option>
-            <option value="recent">Recently scraped</option>
-          </select>
-
-          {/* Source filter */}
-          <select
-            value={source}
-            onChange={(e) => { setSource(e.target.value); setCursor(undefined) }}
-            className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm bg-white"
-          >
-            <option value="">All Sources</option>
-            {sources.map((s: any) => (
-              <option key={s.name} value={s.name}>{s.name}</option>
-            ))}
-          </select>
+      {/* Toolbar — wraps to its own rows on narrow screens instead of overflowing */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-0 flex-1 sm:max-w-xs">
+          <Search size={14} className="absolute top-1/2 left-2.5 -translate-y-1/2 text-subtle" aria-hidden />
+          <input
+            type="search"
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            placeholder="Search title, summary or ticker"
+            aria-label="Search articles"
+            className={`${inputClass} pl-8`}
+          />
+          {searchInput && (
+            <button
+              onClick={() => setSearchInput("")}
+              aria-label="Clear search"
+              className="absolute top-1/2 right-2 -translate-y-1/2 text-subtle hover:text-fg"
+            >
+              <X size={14} aria-hidden />
+            </button>
+          )}
         </div>
+
+        <select
+          value={sort}
+          onChange={(e) => { setSort(e.target.value); resetPaging() }}
+          aria-label="Sort order"
+          className={selectClass}
+        >
+          <option value="newest">Newest published</option>
+          <option value="oldest">Oldest published</option>
+          <option value="recent">Recently scraped</option>
+        </select>
+
+        <select
+          value={source}
+          onChange={(e) => { setSource(e.target.value); resetPaging() }}
+          aria-label="Filter by source"
+          className={selectClass}
+        >
+          <option value="">All sources</option>
+          {sources.map((s) => (
+            <option key={s.name} value={s.name}>{s.name}</option>
+          ))}
+        </select>
+
+        <select
+          value={language}
+          onChange={(e) => {
+            const next = e.target.value as Language
+            setLanguage(next)
+            localStorage.setItem("news.language", next)
+            resetPaging()
+          }}
+          aria-label="Response language"
+          className={selectClass}
+        >
+          <option value="vi">Tiếng Việt</option>
+          <option value="en">English</option>
+        </select>
+
+        {filtered && (
+          <Button variant="ghost" onClick={resetFilters}>Clear filters</Button>
+        )}
       </div>
 
-      {/* Preview Panel */}
+      {/* Preview panel */}
       {showPreview && (
-        <div className="bg-white rounded-xl border border-blue-200 p-5 space-y-4">
-          <div className="flex flex-wrap items-end gap-4">
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Source</label>
-              <select
-                value={previewSource}
-                onChange={(e) => setPreviewSource(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="">Select a source...</option>
-                {sources.map((s: any) => (
-                  <option key={s.name} value={s.name}>{s.name} ({s.domain})</option>
-                ))}
-              </select>
-            </div>
-            <div className="w-28">
-              <label className="block text-sm font-medium text-gray-700 mb-1">Limit</label>
-              <input
-                type="number" min={1} max={10} value={previewLimit}
-                onChange={(e) => setPreviewLimit(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-            <div className="flex gap-2">
-              <button
-                onClick={handlePreview}
-                disabled={!previewSource || previewMut.isPending}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Eye size={14} />
-                {previewMut.isPending ? "Scraping..." : "Preview"}
-              </button>
-              <button
-                onClick={handleRefresh}
-                disabled={!previewSource || refreshMut.isPending}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <RefreshCw size={14} className={refreshMut.isPending ? "animate-spin" : ""} />
-                {refreshMut.isPending ? "Refreshing..." : "Refresh Source"}
-              </button>
-            </div>
-          </div>
-
-          {previewMut.isError && (
-            <div className="bg-red-50 text-red-700 text-sm px-4 py-3 rounded-lg border border-red-200">
-              {(previewMut.error as Error).message}
-            </div>
-          )}
-          {refreshMut.isSuccess && (
-            <div className="bg-green-50 text-green-700 text-sm px-4 py-3 rounded-lg border border-green-200 flex items-center gap-2">
-              <CheckCircle size={16} />
-              Source refreshed! {refreshMut.data?.data?.count ?? 0} articles cached.
-            </div>
-          )}
-
-          {previewArticles.length > 0 && (
-            <div className="border border-gray-200 rounded-lg overflow-hidden">
-              <div className="p-3 border-b border-gray-200 bg-gray-50">
-                <h4 className="text-sm font-semibold text-gray-700">Preview Results ({previewArticles.length} articles)</h4>
-              </div>
-              <div className="divide-y divide-gray-100 max-h-96 overflow-auto">
-                {previewArticles.map((a: any, idx: number) => (
-                  <div key={idx}>
-                    <div onClick={() => toggleExpand(idx)} className="flex items-start gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50">
-                      <button className="mt-0.5 text-gray-400">
-                        {expanded.has(idx) ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                      </button>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-gray-800 text-sm">{a.title || "(No title)"}</span>
-                          {a.is_relevant === false && (
-                            <span className="flex items-center gap-0.5 text-xs text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded"><XCircle size={12} /> Not relevant</span>
-                          )}
-                        </div>
-                        {a.summary && <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{a.summary}</p>}
-                        <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
-                          <span>{a.source}</span>
-                          {a.published_at && <span>{new Date(a.published_at).toLocaleString("vi-VN")}</span>}
-                          {(a.tickers || []).length > 0 && (
-                            <div className="flex gap-1">
-                              {a.tickers.map((t: string) => (
-                                <span key={t} className="bg-blue-50 text-blue-700 px-1 py-0.5 rounded text-xs font-medium">{t}</span>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    {expanded.has(idx) && (
-                      <div className="px-4 pb-4 pl-11">
-                        <div className="bg-gray-50 rounded-lg p-4 text-sm text-gray-700 prose prose-sm max-w-none">
-                          <pre className="whitespace-pre-wrap font-sans text-sm">{a.content || "(No content)"}</pre>
-                        </div>
-                        {a.url && (
-                          <a href={a.url} target="_blank" rel="noopener noreferrer" className="inline-block mt-2 text-xs text-blue-600 hover:underline">
-                            View original article
-                          </a>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Active filters indicator */}
-      {(q || source || sort !== "newest") && (
-        <div className="flex items-center gap-2 text-xs text-gray-500">
-          <span>Filters:</span>
-          {q && <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">Search: "{q}"</span>}
-          {source && <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">Source: {source}</span>}
-          {sort !== "newest" && (
-            <span className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full">
-              {sort === "oldest" ? "Oldest first" : "Recently scraped"}
-            </span>
-          )}
-          <button onClick={resetFilters} className="text-gray-400 hover:text-gray-600 underline">Clear all</button>
-        </div>
-      )}
-
-      {isLoading && <div className="text-gray-500">Loading...</div>}
-      {error && <div className="text-red-500">Error: {(error as Error).message}</div>}
-
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-500">
-            <tr>
-              <th className="px-4 py-2 font-medium">Title</th>
-              <th className="px-4 py-2 font-medium w-28">Source</th>
-              <th className="px-4 py-2 font-medium w-40">Date</th>
-              <th className="px-4 py-2 font-medium w-32">Tickers</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {articles.map((a: any) => (
-              <tr key={a.id} className="hover:bg-gray-50">
-                <td className="px-4 py-2">
-                  <Link to={`/news/${a.id}`} className="text-blue-600 hover:underline font-medium">
-                    {a.title || "(No title)"}
-                  </Link>
-                  {a.summary && <p className="text-xs text-gray-400 mt-0.5 line-clamp-1">{a.summary}</p>}
-                </td>
-                <td className="px-4 py-2 text-gray-500">{a.source}</td>
-                <td className="px-4 py-2 text-gray-500 text-xs">
-                  {a.published_at ? new Date(a.published_at).toLocaleString("vi-VN") : "-"}
-                </td>
-                <td className="px-4 py-2">
-                  <div className="flex flex-wrap gap-1">
-                    {(a.tickers || []).map((t: string) => (
-                      <span key={t} className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded text-xs font-medium">{t}</span>
+        <Card>
+          <CardHeader
+            title="Preview a source"
+            hint="Scrapes live and shows what the model extracts, without writing to the cache."
+          />
+          <div className="space-y-4 p-4">
+            <div className="flex flex-wrap items-end gap-3">
+              <div className="min-w-[200px] flex-1">
+                <Field label="Source">
+                  <select
+                    value={previewSource}
+                    onChange={(e) => setPreviewSource(e.target.value)}
+                    className={`${inputClass} appearance-none`}
+                  >
+                    <option value="">Choose a source…</option>
+                    {sources.map((s) => (
+                      <option key={s.name} value={s.name}>{s.name} — {s.domain}</option>
                     ))}
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {!isLoading && articles.length === 0 && (
-              <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">
-                {q ? `No articles matching "${q}"` : "No articles"}
-              </td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                  </select>
+                </Field>
+              </div>
+              <div className="w-24">
+                <Field label="Articles">
+                  <input
+                    type="number" min={1} max={10} value={previewLimit}
+                    onChange={(e) => setPreviewLimit(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                    className={`${inputClass} tnum`}
+                  />
+                </Field>
+              </div>
+              <div className="flex gap-2">
+                <Button variant="primary" onClick={handlePreview} disabled={!previewSource || previewMut.isPending}>
+                  {previewMut.isPending ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Eye size={14} aria-hidden />}
+                  {previewMut.isPending ? "Scraping…" : "Preview"}
+                </Button>
+                <Button onClick={handleRefreshSource} disabled={!previewSource || refreshMut.isPending}>
+                  <RefreshCw size={14} className={refreshMut.isPending ? "animate-spin" : ""} aria-hidden />
+                  {refreshMut.isPending ? "Scraping…" : "Scrape and cache"}
+                </Button>
+              </div>
+            </div>
 
-      {pagination && (
-        <div className="flex items-center justify-between text-sm text-gray-500">
-          <span>Total: {pagination.total}</span>
-          <div className="flex gap-2">
-            {cursor && (
-              <button onClick={() => setCursor(undefined)} className="px-3 py-1 bg-white border rounded-lg hover:bg-gray-50">First</button>
-            )}
-            {pagination.has_more && (
-              <button onClick={() => setCursor(pagination.next_cursor)} className="px-3 py-1 bg-white border rounded-lg hover:bg-gray-50">Next</button>
+            {previewMut.isPending && <SkeletonRows rows={3} />}
+
+            {previewArticles.length > 0 && (
+              <div className="divide-y divide-line overflow-hidden rounded-lg border border-line">
+                {previewArticles.map((a, idx) => {
+                  const open = expanded.has(idx)
+                  return (
+                    <div key={idx}>
+                      <button
+                        onClick={() => toggleExpand(idx)}
+                        aria-expanded={open}
+                        className="flex w-full items-start gap-2.5 px-3 py-2.5 text-left hover:bg-surface-2"
+                      >
+                        <span className="mt-0.5 shrink-0 text-subtle" aria-hidden>
+                          {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-fg">{a.title || "(no title)"}</span>
+                            {a.is_relevant === false && <Badge tone="warn">Not finance</Badge>}
+                          </span>
+                          {a.summary && <span className="mt-0.5 line-clamp-2 block text-xs text-muted">{a.summary}</span>}
+                          <span className="mt-1 flex flex-wrap items-center gap-2 text-xs text-subtle">
+                            <span>{a.source}</span>
+                            {a.published_at && <span className="tnum">{new Date(a.published_at).toLocaleString("vi-VN")}</span>}
+                            {(a.tickers || []).map((t: string) => (
+                              <Badge key={t} tone="accent">{t}</Badge>
+                            ))}
+                          </span>
+                        </span>
+                      </button>
+                      {open && (
+                        <div className="px-3 pb-3 pl-10">
+                          <pre className="max-h-72 overflow-auto rounded-lg bg-surface-2 p-3 text-xs whitespace-pre-wrap text-fg">
+                            {a.content || "(no content)"}
+                          </pre>
+                          {a.url && (
+                            <a
+                              href={a.url} target="_blank" rel="noopener noreferrer"
+                              className="mt-2 inline-flex items-center gap-1 text-xs text-accent hover:underline"
+                            >
+                              Open original <ExternalLink size={11} aria-hidden />
+                            </a>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             )}
           </div>
-        </div>
+        </Card>
+      )}
+
+      {error ? (
+        <ErrorState title="Couldn't load articles" error={error} onRetry={() => refetch()} />
+      ) : (
+        <Card>
+          <CardHeader
+            title="Articles"
+            hint={total > 0 ? `Showing ${rangeStart}–${rangeEnd} of ${total}` : undefined}
+            actions={isFetching ? <Loader2 size={14} className="animate-spin text-subtle" aria-label="Refreshing" /> : undefined}
+          />
+          {isLoading ? (
+            <div className="p-4"><SkeletonRows rows={8} /></div>
+          ) : articles.length === 0 ? (
+            <EmptyState
+              title={q ? `Nothing matches “${q}”` : "No articles cached"}
+              hint={
+                q
+                  ? "Try a shorter query, or clear the filters."
+                  : language === "en"
+                    ? "English translations appear once the scraper has re-processed each article. Try Tiếng Việt."
+                    : "Run a scrape from the Dashboard to populate the feed."
+              }
+              action={filtered ? <Button onClick={resetFilters}>Clear filters</Button> : undefined}
+            />
+          ) : (
+            <TableScroll>
+              <table className="w-full">
+                <thead className="bg-surface-2">
+                  <tr>
+                    <th scope="col" className={thClass}>Title</th>
+                    <th scope="col" className={`${thClass} w-32`}>Source</th>
+                    <th scope="col" className={`${thClass} w-36`}>Published</th>
+                    <th scope="col" className={`${thClass} w-32`}>Tickers</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line">
+                  {articles.map((a) => (
+                    <tr key={a.id} className="hover:bg-surface-2">
+                      <td className="px-4 py-2.5">
+                        <Link
+                          to={`/news/${a.id}${language !== "vi" ? `?language=${language}` : ""}`}
+                          className="text-sm font-medium text-accent hover:underline"
+                        >
+                          {a.title || "(no title)"}
+                        </Link>
+                        {a.summary && <p className="mt-0.5 line-clamp-1 text-xs text-subtle">{a.summary}</p>}
+                      </td>
+                      <td className={`${tdClass} text-muted`}>{a.source}</td>
+                      <td className={`${tdClass} tnum text-xs text-muted`}>
+                        {a.published_at
+                          ? new Date(a.published_at).toLocaleString(language === "en" ? "en-US" : "vi-VN")
+                          : "—"}
+                      </td>
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-wrap gap-1">
+                          {(a.tickers || []).map((t: string) => (
+                            <Badge key={t} tone="accent">{t}</Badge>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </TableScroll>
+          )}
+
+          {articles.length > 0 && (
+            <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
+              <p className="tnum text-xs text-subtle">
+                Page {page + 1}
+                {total > 0 && ` · ${rangeStart}–${rangeEnd} of ${total}`}
+              </p>
+              <div className="flex items-center gap-2">
+                <IconButton
+                  label="Previous page"
+                  disabled={page === 0}
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  className="border border-line"
+                >
+                  <ChevronLeft size={15} aria-hidden />
+                </IconButton>
+                <IconButton
+                  label="Next page"
+                  disabled={!pagination?.has_more}
+                  onClick={goNext}
+                  className="border border-line"
+                >
+                  <ChevronRight size={15} aria-hidden />
+                </IconButton>
+              </div>
+            </div>
+          )}
+        </Card>
       )}
     </div>
   )

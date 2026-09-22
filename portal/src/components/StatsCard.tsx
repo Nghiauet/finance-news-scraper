@@ -1,21 +1,31 @@
 import type { ReactNode } from "react"
+import { Card } from "@/components/ui"
 
 interface Props {
   title: string
   value: string | number
   icon: ReactNode
   subtitle?: string
+  /** Tint the figure when it carries a state, e.g. errors above zero. */
+  tone?: "default" | "ok" | "warn" | "danger"
 }
 
-export default function StatsCard({ title, value, icon, subtitle }: Props) {
+const TONE_TEXT = {
+  default: "text-fg",
+  ok: "text-ok",
+  warn: "text-warn",
+  danger: "text-danger",
+} as const
+
+export default function StatsCard({ title, value, icon, subtitle, tone = "default" }: Props) {
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5">
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-sm font-medium text-gray-500">{title}</span>
-        <span className="text-gray-400">{icon}</span>
+    <Card className="p-4">
+      <div className="flex items-start justify-between gap-2">
+        <span className="text-xs font-medium tracking-wide text-subtle uppercase">{title}</span>
+        <span className="shrink-0 text-subtle" aria-hidden>{icon}</span>
       </div>
-      <div className="text-2xl font-bold text-gray-900">{value}</div>
-      {subtitle && <div className="text-xs text-gray-400 mt-1">{subtitle}</div>}
-    </div>
+      <p className={`tnum mt-2 text-2xl leading-none font-semibold ${TONE_TEXT[tone]}`}>{value}</p>
+      {subtitle && <p className="mt-1.5 text-xs text-subtle">{subtitle}</p>}
+    </Card>
   )
 }

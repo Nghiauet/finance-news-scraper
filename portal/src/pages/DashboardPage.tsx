@@ -1,201 +1,251 @@
-import { Newspaper, Globe, Cpu, Database, Clock, CheckCircle, XCircle, AlertTriangle, RefreshCw } from "lucide-react"
+import {
+  Newspaper, Globe, Cpu, Database, CheckCircle2, XCircle, AlertTriangle,
+  RefreshCw, Loader2,
+} from "lucide-react"
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts"
 import { useAdminStats, useAdminCron, useRefreshAll, useRefreshStatus } from "@/api/hooks"
+import { useChartColors } from "@/lib/theme"
+import { useToast } from "@/lib/toast-context"
 import StatsCard from "@/components/StatsCard"
+import {
+  Card, CardHeader, PageHeader, PageSkeleton, ErrorState, EmptyState, Button,
+  Badge, StatusDot, Metric, TableScroll, thClass, tdClass,
+} from "@/components/ui"
 
 function formatCronTime(ts: number) {
   const d = new Date(ts * 1000)
-  return `${d.getDate()}/${d.getMonth() + 1} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`
+  const pad = (n: number) => String(n).padStart(2, "0")
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function runTone(run: { timed_out?: boolean; sources_failed?: number }) {
+  if (run.timed_out) return { tone: "warn" as const, label: "Timed out", Icon: AlertTriangle }
+  if ((run.sources_failed ?? 0) > 0) return { tone: "danger" as const, label: "Partial", Icon: XCircle }
+  return { tone: "ok" as const, label: "Complete", Icon: CheckCircle2 }
 }
 
 export default function DashboardPage() {
-  const { data, isLoading, error } = useAdminStats()
+  const { data, isLoading, error, refetch } = useAdminStats()
   const { data: cronData } = useAdminCron()
   const refreshAllMut = useRefreshAll()
   const { data: statusData } = useRefreshStatus()
+  const c = useChartColors()
+  const toast = useToast()
 
   const isRefreshing = statusData?.data?.running === true
 
-  if (isLoading) return <div className="text-gray-500">Loading...</div>
-  if (error) return <div className="text-red-500">Error: {(error as Error).message}</div>
+  if (isLoading) return <PageSkeleton />
+  if (error) return <ErrorState title="Couldn't load dashboard" error={error} onRetry={() => refetch()} />
 
   const d = data?.data
   const cache = d?.cache || {}
   const totals = d?.llm_totals || {}
-  const sources = d?.sources || []
-  const cronRuns: any[] = (cronData?.data?.runs || []).slice().reverse()
+  const sources: { name: string; domain: string; article_count: number }[] = d?.sources || []
 
-  const durationChart = cronRuns.map((r: any) => ({
+  // Oldest-first for the chart (time reads left to right); the history table
+  // below reverses it again so the newest run is on top.
+  const cronRuns: any[] = (cronData?.data?.runs || []).slice().reverse()
+  const lastRun = cronRuns.length ? cronRuns[cronRuns.length - 1] : null
+  const durationChart = cronRuns.map((r) => ({
     time: formatCronTime(r.started_at),
     duration: r.duration_s,
     articles: r.articles_total,
-    sources_ok: r.sources_ok,
   }))
 
-  // Latest run for quick status
-  const lastRun = cronRuns.length ? cronRuns[cronRuns.length - 1] : null
+  const errorCount = totals.error_count ?? 0
+  const emptySources = sources.filter((s) => !s.article_count).length
+
+  function handleRefresh() {
+    if (!confirm("Scrape every source for new articles now? This is the same work the 30-minute cycle does.")) return
+    refreshAllMut.mutate(undefined, {
+      onSuccess: () => toast.success("Refresh started. Progress shows in the sidebar."),
+      onError: (err) => toast.error((err as Error).message),
+    })
+  }
 
   return (
     <div className="space-y-6">
-      <h2 className="text-xl font-semibold text-gray-800">Dashboard</h2>
+      <PageHeader title="Dashboard" hint="Pipeline health at a glance.">
+        <Button variant="primary" onClick={handleRefresh} disabled={isRefreshing || refreshAllMut.isPending}>
+          {isRefreshing || refreshAllMut.isPending ? (
+            <Loader2 size={14} className="animate-spin" aria-hidden />
+          ) : (
+            <RefreshCw size={14} aria-hidden />
+          )}
+          {isRefreshing ? "Scraping…" : "Run scrape now"}
+        </Button>
+      </PageHeader>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatsCard title="Cached Articles" value={cache.article_count ?? 0} icon={<Newspaper size={20} />} />
-        <StatsCard title="Active Sources" value={`${cache.news_sources ?? 0} / ${sources.length}`} icon={<Globe size={20} />} />
-        <StatsCard title="Total Tokens" value={(totals.total_tokens ?? 0).toLocaleString()} icon={<Cpu size={20} />} subtitle={`${(totals.call_count ?? 0).toLocaleString()} calls`} />
-        <StatsCard title="Redis Memory" value={`${cache.memory_used_mb ?? 0} MB`} icon={<Database size={20} />} />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatsCard
+          title="Cached articles"
+          value={(cache.article_count ?? 0).toLocaleString()}
+          icon={<Newspaper size={18} />}
+        />
+        <StatsCard
+          title="Sources with data"
+          value={`${cache.news_sources ?? 0} / ${sources.length}`}
+          tone={emptySources > 0 ? "warn" : "ok"}
+          subtitle={emptySources > 0 ? `${emptySources} empty` : "all reporting"}
+          icon={<Globe size={18} />}
+        />
+        <StatsCard
+          title="Tokens used"
+          value={(totals.total_tokens ?? 0).toLocaleString()}
+          subtitle={`${(totals.call_count ?? 0).toLocaleString()} calls`}
+          icon={<Cpu size={18} />}
+        />
+        <StatsCard
+          title="LLM errors"
+          value={errorCount.toLocaleString()}
+          tone={errorCount > 0 ? "danger" : "ok"}
+          subtitle={errorCount > 0 ? "see LLM Usage" : "none recorded"}
+          icon={<Database size={18} />}
+        />
       </div>
 
-      {/* Cron Job Status */}
-      <div className="bg-white rounded-xl border border-gray-200 p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-sm font-semibold text-gray-700 flex items-center gap-2">
-            <Clock size={16} /> Cron Job
-          </h3>
-          <div className="flex items-center gap-3">
-            {lastRun && <span className="text-xs text-gray-400">Last: {formatCronTime(lastRun.started_at)}</span>}
-            {isRefreshing && <span className="text-xs text-blue-600 font-medium animate-pulse">Running...</span>}
-            <button
-              onClick={() => {
-                if (!confirm("Scrape all sources for new articles now? (Same as the automatic 30-min cron)")) return
-                refreshAllMut.mutate()
-              }}
-              disabled={isRefreshing || refreshAllMut.isPending}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
-              {isRefreshing ? "Running..." : "Run Now"}
-            </button>
-          </div>
-        </div>
-        {refreshAllMut.isError && (
-          <div className="mb-3 text-sm text-red-600 bg-red-50 px-3 py-2 rounded-lg">
-            {(refreshAllMut.error as Error).message}
-          </div>
+      <Card>
+        <CardHeader
+          title="Last scrape cycle"
+          hint="Runs automatically every 30 minutes."
+          actions={
+            isRefreshing ? (
+              <span className="flex items-center gap-1.5 text-xs font-medium text-accent">
+                <StatusDot tone="accent" pulse /> in progress
+              </span>
+            ) : lastRun ? (
+              <Badge tone={runTone(lastRun).tone}>{runTone(lastRun).label}</Badge>
+            ) : undefined
+          }
+        />
+        {!lastRun ? (
+          <EmptyState
+            title="No cycle has finished yet"
+            hint="The first run starts when the API boots. Give it a few minutes, or start one now."
+            action={<Button variant="primary" onClick={handleRefresh}>Run scrape now</Button>}
+          />
+        ) : (
+          <dl className="grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 lg:grid-cols-5">
+            <Metric label="Started" value={formatCronTime(lastRun.started_at)} />
+            <Metric label="Duration" value={`${lastRun.duration_s}s`} />
+            <Metric label="Sources" value={`${lastRun.sources_ok} / ${lastRun.sources_total}`} />
+            <Metric label="Articles" value={(lastRun.articles_total ?? 0).toLocaleString()} />
+            <Metric
+              label="Failed"
+              value={
+                <span className={lastRun.sources_failed > 0 ? "text-danger" : "text-ok"}>
+                  {lastRun.sources_failed}
+                </span>
+              }
+            />
+          </dl>
         )}
-        {lastRun && (
-          <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-sm">
-            <div>
-              <span className="text-gray-400">Duration</span>
-              <p className="font-medium text-gray-800">{lastRun.duration_s}s</p>
-            </div>
-            <div>
-              <span className="text-gray-400">Sources</span>
-              <p className="font-medium text-gray-800">
-                <span className="text-green-600">{lastRun.sources_ok}</span>
-                <span className="text-gray-400"> / {lastRun.sources_total}</span>
-              </p>
-            </div>
-            <div>
-              <span className="text-gray-400">Articles</span>
-              <p className="font-medium text-gray-800">{lastRun.articles_total}</p>
-            </div>
-            <div>
-              <span className="text-gray-400">Failed</span>
-              <p className={`font-medium ${lastRun.sources_failed > 0 ? "text-red-600" : "text-green-600"}`}>
-                {lastRun.sources_failed}
-              </p>
-            </div>
-            <div>
-              <span className="text-gray-400">Status</span>
-              <p className="flex items-center gap-1">
-                {lastRun.timed_out ? (
-                  <><AlertTriangle size={14} className="text-yellow-500" /> <span className="font-medium text-yellow-600">Timeout</span></>
-                ) : lastRun.sources_failed > 0 ? (
-                  <><XCircle size={14} className="text-orange-500" /> <span className="font-medium text-orange-600">Partial</span></>
-                ) : (
-                  <><CheckCircle size={14} className="text-green-500" /> <span className="font-medium text-green-600">OK</span></>
-                )}
-              </p>
-            </div>
-          </div>
-        )}
-      </div>
+      </Card>
 
-      {/* Cron Duration Chart */}
       {durationChart.length > 1 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h3 className="text-sm font-semibold text-gray-700 mb-4">Cron Run Duration</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={durationChart}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="time" tick={{ fontSize: 11 }} />
-              <YAxis tick={{ fontSize: 11 }} unit="s" />
-              <Tooltip formatter={(v, name) => [name === "duration" ? `${v}s` : v, name === "duration" ? "Duration" : "Articles"]} />
-              <Line type="monotone" dataKey="duration" stroke="#3b82f6" strokeWidth={2} dot={{ r: 3 }} name="Duration" />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+        <Card>
+          <CardHeader title="Cycle duration" hint="Seconds per run. A rising line usually means a slow source or a slow model." />
+          {/* overflow-hidden: recharts parks its tooltip wrapper at a stale
+              absolute position while hidden, which widened the whole document on
+              narrow viewports. Active tooltips stay inside the chart, so clipping
+              only removes the off-screen artifact. */}
+          <div className="overflow-hidden p-4 pt-2">
+            <ResponsiveContainer width="100%" height={200}>
+              <LineChart data={durationChart} margin={{ top: 4, right: 8, bottom: 0, left: -8 }}>
+                <CartesianGrid stroke={c.line} strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="time" tick={{ fontSize: 11, fill: c.muted }} stroke={c.line} />
+                <YAxis tick={{ fontSize: 11, fill: c.muted }} stroke={c.line} unit="s" width={48} />
+                <Tooltip
+                  contentStyle={{
+                    background: c.surface,
+                    border: `1px solid ${c.line}`,
+                    borderRadius: 8,
+                    fontSize: 12,
+                    color: c.fg,
+                  }}
+                  labelStyle={{ color: c.muted }}
+                  formatter={(v) => [`${v}s`, "Duration"]}
+                />
+                <Line
+                  type="monotone"
+                  dataKey="duration"
+                  stroke={c.accent}
+                  strokeWidth={2}
+                  dot={{ r: 2, fill: c.accent }}
+                  activeDot={{ r: 4 }}
+                  name="Duration"
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
       )}
 
-      {/* Cron Runs History */}
       {cronRuns.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <div className="p-4 border-b border-gray-200">
-            <h3 className="text-sm font-semibold text-gray-700">Cron History ({cronRuns.length} runs)</h3>
-          </div>
-          <div className="max-h-72 overflow-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 text-left text-gray-500 sticky top-0">
+        <Card>
+          <CardHeader title="Cycle history" hint={`${cronRuns.length} most recent runs, newest first.`} />
+          <TableScroll className="max-h-72 overflow-y-auto">
+            <table className="w-full">
+              <thead className="sticky top-0 bg-surface-2">
                 <tr>
-                  <th className="px-4 py-2 font-medium">Time</th>
-                  <th className="px-4 py-2 font-medium text-right">Duration</th>
-                  <th className="px-4 py-2 font-medium text-right">Sources</th>
-                  <th className="px-4 py-2 font-medium text-right">Articles</th>
-                  <th className="px-4 py-2 font-medium">Status</th>
+                  <th scope="col" className={thClass}>Started</th>
+                  <th scope="col" className={`${thClass} text-right`}>Duration</th>
+                  <th scope="col" className={`${thClass} text-right`}>Sources</th>
+                  <th scope="col" className={`${thClass} text-right`}>Articles</th>
+                  <th scope="col" className={thClass}>Result</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
-                {[...cronRuns].reverse().map((r: any, i: number) => (
-                  <tr key={i} className="hover:bg-gray-50">
-                    <td className="px-4 py-2 text-gray-500 whitespace-nowrap">{formatCronTime(r.started_at)}</td>
-                    <td className="px-4 py-2 text-right text-gray-700">{r.duration_s}s</td>
-                    <td className="px-4 py-2 text-right">
-                      <span className="text-green-600">{r.sources_ok}</span>
-                      <span className="text-gray-400">/{r.sources_total}</span>
-                    </td>
-                    <td className="px-4 py-2 text-right text-gray-700">{r.articles_total}</td>
-                    <td className="px-4 py-2">
-                      {r.timed_out ? (
-                        <span className="text-xs bg-yellow-50 text-yellow-700 px-1.5 py-0.5 rounded font-medium">Timeout</span>
-                      ) : r.sources_failed > 0 ? (
-                        <span className="text-xs bg-orange-50 text-orange-700 px-1.5 py-0.5 rounded font-medium">Partial</span>
-                      ) : (
-                        <span className="text-xs bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-medium">OK</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+              <tbody className="divide-y divide-line">
+                {[...cronRuns].reverse().map((r, i) => {
+                  const { tone, label } = runTone(r)
+                  return (
+                    <tr key={i} className="hover:bg-surface-2">
+                      <td className={`${tdClass} tnum whitespace-nowrap text-muted`}>{formatCronTime(r.started_at)}</td>
+                      <td className={`${tdClass} tnum text-right`}>{r.duration_s}s</td>
+                      <td className={`${tdClass} tnum text-right`}>
+                        <span className={r.sources_failed > 0 ? "text-warn" : "text-ok"}>{r.sources_ok}</span>
+                        <span className="text-subtle">/{r.sources_total}</span>
+                      </td>
+                      <td className={`${tdClass} tnum text-right`}>{r.articles_total}</td>
+                      <td className="px-4 py-2"><Badge tone={tone}>{label}</Badge></td>
+                    </tr>
+                  )
+                })}
               </tbody>
             </table>
-          </div>
-        </div>
+          </TableScroll>
+        </Card>
       )}
 
-      {/* Sources */}
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        <div className="p-4 border-b border-gray-200">
-          <h3 className="text-sm font-semibold text-gray-700">Sources</h3>
-        </div>
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50 text-left text-gray-500">
-            <tr>
-              <th className="px-4 py-2 font-medium">Name</th>
-              <th className="px-4 py-2 font-medium">Domain</th>
-              <th className="px-4 py-2 font-medium text-right">Articles</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {sources.map((s: any) => (
-              <tr key={s.name} className="hover:bg-gray-50">
-                <td className="px-4 py-2 font-medium text-gray-800">{s.name}</td>
-                <td className="px-4 py-2 text-gray-500">{s.domain}</td>
-                <td className="px-4 py-2 text-right text-gray-700">{s.article_count}</td>
+      <Card>
+        <CardHeader title="Sources" hint={`${sources.length} configured.`} />
+        <TableScroll>
+          <table className="w-full">
+            <thead className="bg-surface-2">
+              <tr>
+                <th scope="col" className={thClass}>Name</th>
+                <th scope="col" className={thClass}>Domain</th>
+                <th scope="col" className={`${thClass} text-right`}>Articles</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {sources.map((s) => (
+                <tr key={s.name} className="hover:bg-surface-2">
+                  <td className={`${tdClass} font-medium`}>{s.name}</td>
+                  <td className={`${tdClass} text-muted`}>{s.domain}</td>
+                  <td className={`${tdClass} tnum text-right`}>
+                    {s.article_count ? (
+                      s.article_count.toLocaleString()
+                    ) : (
+                      <span className="text-warn">0</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </TableScroll>
+      </Card>
     </div>
   )
 }

@@ -8,7 +8,7 @@ import os
 import ssl
 import time
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -36,6 +36,9 @@ class Article:
     content: Optional[str] = None
     is_relevant: bool = True
     scraped_at: Optional[str] = None
+    title_en: Optional[str] = None
+    summary_en: Optional[str] = None
+    content_en: Optional[str] = None
 
 
 HEADERS = {
@@ -46,6 +49,43 @@ HEADERS = {
     ),
     "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
 }
+
+VN_TZ = timezone(timedelta(hours=7))
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    """Parse an ISO 8601 string into a tz-aware datetime, or None if unparseable."""
+    try:
+        s = value.strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=VN_TZ)
+    return dt
+
+
+def _sanitize_published_at(value: Optional[str]) -> Optional[str]:
+    """Drop a published_at that lies in the future.
+
+    The LLM occasionally mis-extracts a date mentioned in the article body
+    (e.g. a trading-week range like "25-29/6") as the publish date, yielding a
+    future timestamp. A future date pins the article to the top of the
+    newest-first feed forever and renders as "just now" on the frontend, so we
+    discard it (→ null) rather than trust it. Past/parseable dates pass through
+    unchanged; unparseable values are left as-is."""
+    if not value:
+        return value
+    dt = _parse_iso(value)
+    if dt is None:
+        return value
+    now = datetime.now(VN_TZ)
+    if dt > now + timedelta(days=1):
+        log.warning("Dropping future published_at=%s (now=%s)", value, now.isoformat())
+        return None
+    return value
 
 
 def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
@@ -128,23 +168,33 @@ def _extract_next_data(soup: BeautifulSoup) -> Optional[dict]:
     return None
 
 
-def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
-    """Fetch a page and return (visible_text, thumbnail_dict)."""
+def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """Fetch a page and return (visible_text, thumbnail_dict, published_at).
+
+    published_at is None for generic pages — the LLM extracts the date from the
+    text in that case. Next.js pages (get_page_data_nextjs) carry an authoritative
+    date so they return it here."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
-        return None, None
+        return None, None, None
     thumbnail = _extract_thumbnail(soup)
     for tag in soup.select("script, style, nav, footer, header, aside"):
         tag.decompose()
     lines = [line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip()]
-    return "\n".join(lines), thumbnail
+    return "\n".join(lines), thumbnail, None
 
 
-def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict]]:
-    """Extract article text from a Next.js page's __NEXT_DATA__ JSON."""
+def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """Extract article text, thumbnail, and the authoritative publish date from a
+    Next.js page's __NEXT_DATA__ JSON.
+
+    The `date` field on the post is the source CMS's real publish timestamp; we
+    return it so the caller can trust it over the LLM's guess (the LLM only sees
+    the body text and can mistake a date mentioned in the prose for the publish
+    date)."""
     soup = fetch_html(url, weak_ssl=weak_ssl)
     if not soup:
-        return None, None
+        return None, None, None
 
     thumbnail = _extract_thumbnail(soup)
     data = _extract_next_data(soup)
@@ -163,7 +213,7 @@ def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str
                             if img.get("imageUrl"):
                                 thumbnail = {"url": img["imageUrl"]}
                                 break
-                    return text, thumbnail
+                    return text, thumbnail, article.get("date")
         except (KeyError, IndexError, TypeError):
             log.warning("Failed to parse __NEXT_DATA__ for %s", url)
 
@@ -193,7 +243,19 @@ SOURCES = {
 }
 
 
-def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> list[Article]:
+def scrape_source(
+    source_name: str,
+    limit: int = 3,
+    dry_run: bool = False,
+    deadline: Optional[float] = None,
+) -> list[Article]:
+    """Scrape one source, returning the articles gathered.
+
+    `deadline` is a time.monotonic() value after which no further article is
+    started. It exists because asyncio.wait_for cannot cancel a thread: without a
+    cooperative stop, a timed-out source kept scraping in the background and went
+    on competing for the LLM lock, slowing every later cycle.
+    """
     source = SOURCES[source_name]
     domain = source["domain"]
     weak_ssl = source.get("weak_ssl", False)
@@ -209,65 +271,84 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
 
     results = []
     for i, meta in enumerate(articles_meta[:limit]):
+        if deadline is not None and time.monotonic() >= deadline:
+            log.warning("[%s] budget spent — stopping with %d/%d articles",
+                        source_name, len(results), min(limit, len(articles_meta)))
+            break
         url = meta["url"]
         n = f"{i + 1}/{limit}"
         log.info("[%s] [%s] %s", source_name, n, meta["title"][:70])
 
         cached = cache_client.get_article(url)
-        if cached:
+        if cached and cached.get("title_en"):
             log.info("[%s] [%s] cache hit", source_name, n)
             article = Article(
                 title=cached.get("title", meta["title"]),
                 url=url,
                 source=domain,
-                published_at=cached.get("published_at"),
+                published_at=_sanitize_published_at(cached.get("published_at")),
                 summary=cached.get("summary"),
                 tickers=cached.get("tickers", []),
                 thumbnail=cached.get("thumbnail"),
                 content=cached.get("content"),
                 is_relevant=cached.get("is_relevant", True),
                 scraped_at=cached.get("scraped_at"),
+                title_en=cached.get("title_en"),
+                summary_en=cached.get("summary_en"),
+                content_en=cached.get("content_en"),
             )
             results.append(article)
             continue
+        elif cached:
+            log.info("[%s] [%s] cache hit (legacy, missing EN — re-extracting)", source_name, n)
 
         if is_nextjs:
-            page_text, thumbnail = get_page_data_nextjs(url, weak_ssl=weak_ssl)
+            page_text, thumbnail, page_published_at = get_page_data_nextjs(url, weak_ssl=weak_ssl)
         else:
-            page_text, thumbnail = get_page_data(url, weak_ssl=weak_ssl)
+            page_text, thumbnail, page_published_at = get_page_data(url, weak_ssl=weak_ssl)
         if not page_text:
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
 
         now = time.strftime("%Y-%m-%dT%H:%M:%S+07:00")
-        parsed = extract_and_summarize(page_text)
+        parsed = extract_and_summarize(page_text, deadline=deadline)
         if parsed:
+            # Prefer the source's authoritative date over the LLM's guess, then
+            # drop it if it's in the future (LLM mis-extraction).
+            published_at = _sanitize_published_at(page_published_at or parsed.get("published_at"))
             article = Article(
                 title=parsed.get("title") or meta["title"],
                 url=url,
                 source=domain,
-                published_at=parsed.get("published_at"),
+                published_at=published_at,
                 summary=parsed.get("summary"),
                 tickers=parsed.get("tickers", []),
                 thumbnail=thumbnail,
                 content=parsed.get("content"),
                 is_relevant=parsed.get("is_relevant", True),
                 scraped_at=now,
+                title_en=parsed.get("title_en"),
+                summary_en=parsed.get("summary_en"),
+                content_en=parsed.get("content_en"),
             )
             if not dry_run:
                 cache_client.set_article(
                     url, article.title, article.published_at, article.summary,
                     article.tickers, article.thumbnail, article.content,
                     article.is_relevant,
+                    title_en=article.title_en,
+                    summary_en=article.summary_en,
+                    content_en=article.content_en,
                 )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
         else:
             log.warning("[%s] [%s] LLM failed — skipping", source_name, n)
 
-        # Update news list incrementally so articles are visible immediately
+        # Publish progress so new articles are visible immediately, without
+        # temporarily hiding the ones already cached.
         if results and not dry_run:
-            _flush_news(source_name, results)
+            _flush_news(source_name, results, merge=True)
 
     log.info("[%s] finished: %d/%d articles in %.1fs", source_name, len(results), limit, time.monotonic() - t_source)
 
@@ -277,8 +358,19 @@ def scrape_source(source_name: str, limit: int = 3, dry_run: bool = False) -> li
     return results
 
 
-def _flush_news(source_name: str, results: list[Article]) -> None:
-    """Write current results to the news:<source> cache list."""
+def _flush_news(source_name: str, results: list[Article], *, merge: bool = False) -> None:
+    """Write results to the news:<source> cache list.
+
+    merge=True unions the results with whatever is already cached (deduped by
+    URL, fresh entries winning). Used for the incremental in-loop flush: a plain
+    replace dropped the source to a single article and let it climb back over
+    several minutes, so anything polling the API mid-refresh saw a nearly-empty
+    source.
+
+    merge=False replaces the list outright. Used for the final flush so the
+    cache ends up authoritative and bounded — articles that fell off the
+    source's front page are dropped instead of lingering until the key expires.
+    """
     payload = [
         {
             "title": a.title,
@@ -291,9 +383,18 @@ def _flush_news(source_name: str, results: list[Article]) -> None:
             "content": a.content,
             "is_relevant": a.is_relevant,
             "scraped_at": a.scraped_at,
+            "title_en": a.title_en,
+            "summary_en": a.summary_en,
+            "content_en": a.content_en,
         }
         for a in results
     ]
+    if merge:
+        fresh_urls = {item["url"] for item in payload}
+        payload += [
+            old for old in cache_client.get_news(source_name)
+            if old.get("url") not in fresh_urls
+        ]
     cache_client.set_news(source_name, payload)
 
 

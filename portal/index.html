@@ -4,7 +4,23 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>portal</title>
+    <title>News Pipeline Console</title>
+    <script>
+      // Apply the stored theme before first paint, otherwise a dark-mode user
+      // gets a white flash on every page load.
+      (function () {
+        try {
+          var stored = localStorage.getItem("portal.theme")
+          var dark =
+            stored === "dark" ||
+            (stored !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches)
+          if (dark) document.documentElement.classList.add("dark")
+        } catch (e) {
+          /* private mode / storage blocked — fall through to light */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
