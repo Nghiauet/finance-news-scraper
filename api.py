@@ -225,6 +225,23 @@ async def _do_refresh():
     refresh_timeout = settings_mod.get_setting("refresh_timeout")
     articles_per = settings_mod.get_setting("articles_per_source")
     log.info("[CRON] refresh started — %d sources, timeout %ds", total, refresh_timeout)
+    # One cheap ping before fanning out to 13 sources: a retired model then
+    # costs a single request instead of the entire refresh budget, and the
+    # failover happens before any article is attempted.
+    health = llm_client.ensure_healthy_active_model()
+    if health.get("switched"):
+        log.warning("[CRON] active model was gone — failed over to %s", health.get("model"))
+    if health.get("dead") and not health.get("switched"):
+        duration = time.monotonic() - t_all
+        log.error("[CRON] no healthy LLM model — skipping cycle: %s", health.get("detail"))
+        _finish_cycle(started_at, duration, total, 0, 0, False,
+                      note=f"no healthy LLM model ({health.get('detail', '')})")
+        return
+    if not health.get("ok"):
+        # Transient ping failure: proceed, per-article retries will cope.
+        log.warning("[CRON] model ping failed but looks transient — continuing: %s",
+                    health.get("detail"))
+
     ok = 0
     articles_total = 0
     timed_out = False
@@ -529,6 +546,9 @@ def _enrich_models(models: list[dict], active_id: str | None) -> list[dict]:
     """Annotate models with is_active flag, per-model stats, and masked API keys."""
     for m in models:
         m["is_active"] = m["id"] == active_id
+        # "ok" unless failover marked it dead, so the portal can show at a glance
+        # which models are retired rather than only which one is active.
+        m["health"] = m.get("health") or "ok"
         model_stats = cache_client.get_llm_stats(recent_limit=0, model_id=m["id"])
         m["stats"] = model_stats.get("totals", {})
         if "api_key" in m:
@@ -784,6 +804,10 @@ def admin_update_model(model_id: str, body: ModelUpdate, _user: str = Depends(re
     ok = cache_client.update_model(model_id, updates)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    # An edit is how a dead model gets fixed (rotated key, renamed model), so the
+    # dead mark must not outlive the fix and keep failover skipping it.
+    cache_client.clear_model_health(model_id)
+    cache_client.release_lock("failover:all_dead")
     llm_client.invalidate_active_client()
     config = cache_client.get_model_config(model_id)
     if config and "api_key" in config:
@@ -808,6 +832,11 @@ def admin_activate_model(model_id: str, _user: str = Depends(require_admin)):
     if not config:
         raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
     cache_client.set_active_model(model_id)
+    # Activating by hand is an operator saying "use this one" — drop any dead
+    # mark and the all-dead back-off so the choice takes effect immediately
+    # instead of being skipped by failover's cooldown.
+    cache_client.clear_model_health(model_id)
+    cache_client.release_lock("failover:all_dead")
     llm_client.invalidate_active_client()
     return {"success": True, "data": {"active_model_id": model_id}, "meta": _admin_meta(t0)}
 

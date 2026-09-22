@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from pydantic import BaseModel
 
 import cache_client
@@ -21,6 +21,37 @@ _call_lock = threading.Lock()
 # minimum there's no point starting a call at all.
 _MIN_CALL_TIMEOUT = 15.0
 _MAX_CALL_TIMEOUT = 300.0
+
+# Statuses that mean this model is gone for this account rather than briefly
+# unwell, so retrying it — this cycle or the next — cannot succeed:
+#   410 provider retired the model (NVIDIA EOLs models with no warning)
+#   404 model not available for this account
+#   401/403 key rejected or not entitled
+# Everything else (timeout, 429, 5xx, empty completion, truncation) is transient
+# and must NOT trigger a switch: a healthy model briefly overloaded would
+# otherwise get demoted mid-cycle.
+_DEAD_MODEL_STATUSES = {401, 403, 404, 410}
+
+# How long a model stays skipped after being marked dead. An expired key can be
+# fixed without anything in the registry changing, so dead is not forever.
+_DEAD_MODEL_COOLDOWN_S = 6 * 3600
+
+# After a sweep finds nothing alive, stop sweeping for a while. Without this,
+# every one of ~260 articles in a cycle would re-probe every registered model.
+_ALL_DEAD_BACKOFF_S = 900
+
+_HEALTH_PING_TIMEOUT = 30.0
+_PROBE_TIMEOUT = 90.0
+
+# A candidate must produce a real bilingual extraction from this before it is
+# promoted. Deliberately not a "reply OK" ping: nvidia/nemotron-parse-2.0
+# answers that in 0.9s with 3 tokens and is useless here, so a ping-based gate
+# would swap a dead pipeline for a silently broken one.
+_PROBE_ARTICLE = (
+    "Thị trường chứng khoán Việt Nam phiên hôm nay ghi nhận VN-Index tăng 12 điểm lên 1.320 điểm. "
+    "Nhóm ngân hàng dẫn dắt đà tăng với VCB tăng 2,1% và CTG tăng 1,8%. "
+    "Khối ngoại mua ròng 450 tỷ đồng, thanh khoản toàn sàn đạt 18.500 tỷ đồng."
+)
 
 _SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON song ngữ Việt-Anh với 9 trường sau.
 
@@ -157,6 +188,190 @@ def invalidate_active_client():
 
 
 # ---------------------------------------------------------------------------
+# Automatic failover when a model is retired
+# ---------------------------------------------------------------------------
+
+def _is_model_dead(e: Exception) -> bool:
+    """True when the error means this model will never answer again."""
+    return isinstance(e, APIStatusError) and e.status_code in _DEAD_MODEL_STATUSES
+
+
+def _system_prompt() -> str:
+    """The extraction prompt with today's Vietnam date filled in.
+
+    Derived from the epoch rather than `datetime`/`date` so the probe path does
+    not depend on which of the two this module happens to import.
+    """
+    return _SYSTEM_PROMPT.format(today=time.strftime("%Y-%m-%d", time.gmtime(time.time() + 7 * 3600)))
+
+
+def _probe_extraction(config_data: dict) -> tuple[bool, str, bool]:
+    """Run one real extraction against a candidate model.
+
+    Returns (ok, detail, dead). `ok` means the endpoint answered AND the answer
+    validated as a bilingual ArticleExtraction — the same bar the pipeline
+    applies, so a model that cannot do the job is never promoted. `dead` marks a
+    permanent rejection (401/403/404/410), which is the only kind worth
+    remembering: a candidate that merely timed out may be fine in ten minutes.
+    """
+    base_url = (config_data.get("base_url") or "").strip()
+    api_key = (config_data.get("api_key") or "").strip()
+    model_name = (config_data.get("model_name") or "").strip()
+    if not base_url or not api_key or not model_name:
+        return False, "incomplete model config (base_url/api_key/model_name)", False
+    try:
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=_PROBE_TIMEOUT)
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": _system_prompt()},
+                {"role": "user", "content": _PROBE_ARTICLE},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=min(2048, _probe_max_tokens()),
+        )
+        choice = resp.choices[0]
+        raw = choice.message.content
+        if not raw or not raw.strip():
+            return False, "empty response", False
+        if choice.finish_reason == "length":
+            return False, "output truncated at max_tokens", False
+        extraction = _sanitize_and_parse_json(raw)
+        if not (extraction.title or "").strip():
+            return False, "extraction returned an empty title", False
+        if not (extraction.title_en or "").strip():
+            return False, "no English translation (title_en missing)", False
+        return True, f"extracted {len(extraction.content or '')} chars, tickers={extraction.tickers}", False
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}", _is_model_dead(e)
+
+
+def _probe_max_tokens() -> int:
+    """Output cap for a probe — the configured one, bounded to keep probes cheap."""
+    import settings as settings_mod
+    try:
+        return int(settings_mod.get_setting("llm_max_output_tokens"))
+    except Exception:
+        return 2048
+
+
+def failover_active_model(exclude_id: str, reason: str) -> Optional[tuple[OpenAI, ModelConfig]]:
+    """Promote the next registered model that can actually do an extraction.
+
+    Candidates are tried in `models:list` order, skipping the model that just
+    died and any marked dead inside the cooldown window. Callers must already
+    hold `_call_lock` — this does network I/O but never takes the lock itself,
+    because its only callers run inside it.
+    """
+    if cache_client.lock_held("failover:all_dead"):
+        log.debug("failover suppressed — no healthy model as of %ds ago", _ALL_DEAD_BACKOFF_S)
+        return None
+
+    # Keep a concurrently running scrape.py from probing the same models.
+    if not cache_client.acquire_lock("failover:sweep", 300):
+        current = cache_client.get_active_model_id()
+        if current and current != exclude_id:
+            log.info("another process already failed over to %s", current)
+            _manager.invalidate()
+            try:
+                return _manager.get_active_client()
+            except Exception:
+                return None
+        return None
+
+    try:
+        candidates = cache_client.list_models()
+        log.warning("model %s is gone (%s) — trying %d alternative(s)",
+                    exclude_id, reason, max(0, len(candidates) - 1))
+        now = time.time()
+        for cand in candidates:
+            mid = cand.get("id")
+            if not mid or mid == exclude_id:
+                continue
+            dead_since = cache_client.model_dead_since(mid)
+            if dead_since and (now - dead_since) < _DEAD_MODEL_COOLDOWN_S:
+                log.info("skipping %s (%s) — marked dead %.0f min ago",
+                         cand.get("name"), mid, (now - dead_since) / 60)
+                continue
+            ok, detail, cand_dead = _probe_extraction(cand)
+            if ok:
+                cache_client.clear_model_health(mid)
+                if not cache_client.set_active_model(mid):
+                    log.error("could not activate %s — registry write failed", mid)
+                    continue
+                cache_client.release_lock("failover:all_dead")
+                cache_client.record_error(
+                    "failover",
+                    f"Switched active model to '{cand.get('name')}' ({cand.get('model_name')}) "
+                    f"after '{exclude_id}' failed: {reason}",
+                    model_id=mid,
+                )
+                log.warning("FAILOVER → %s (%s): %s", cand.get("name"), cand.get("model_name"), detail)
+                _manager.invalidate()
+                return _manager.get_active_client()
+            log.warning("candidate %s (%s) rejected: %s", cand.get("name"), mid, detail)
+            # Only a permanent failure earns a dead mark. A candidate that timed
+            # out may well be fine later, and marking it would hide it for 6h.
+            if cand_dead:
+                cache_client.mark_model_dead(mid, detail)
+
+        cache_client.acquire_lock("failover:all_dead", _ALL_DEAD_BACKOFF_S)
+        cache_client.record_error(
+            "failover",
+            f"No healthy LLM model available — '{exclude_id}' is gone ({reason}) and no "
+            f"registered alternative passed an extraction probe",
+        )
+        log.error("FAILOVER FAILED — no registered model passed the probe")
+        return None
+    finally:
+        cache_client.release_lock("failover:sweep")
+
+
+def ensure_healthy_active_model() -> dict:
+    """Check the active model with one cheap ping, failing over if it is gone.
+
+    Called before a refresh cycle so a retired model costs one request instead
+    of an entire refresh budget. Detection is cheap (a dead model returns
+    401/403/404/410 whatever the prompt is); promotion is strict and lives in
+    `failover_active_model`.
+    """
+    with _call_lock:
+        try:
+            client, config = _manager.get_active_client()
+        except Exception as e:
+            return {"ok": False, "dead": True, "switched": False, "model": None, "detail": str(e)}
+
+        try:
+            client.chat.completions.create(
+                model=config.model_name,
+                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+                max_tokens=8,
+                timeout=_HEALTH_PING_TIMEOUT,
+            )
+            return {"ok": True, "dead": False, "switched": False,
+                    "model": config.model_name, "detail": "ping ok"}
+        except Exception as e:
+            if not _is_model_dead(e):
+                # One bad ping is not grounds for a switch — the per-article
+                # retries handle a wobbly endpoint.
+                log.warning("active model ping failed (transient): %s", e)
+                return {"ok": False, "dead": False, "switched": False,
+                        "model": config.model_name, "detail": str(e)}
+            reason = str(e)
+            if config.id != "_env":
+                cache_client.mark_model_dead(config.id, reason)
+            promoted = failover_active_model(config.id, reason)
+            if promoted:
+                _client, new_config = promoted
+                return {"ok": True, "dead": True, "switched": True,
+                        "model": new_config.model_name,
+                        "detail": f"failed over from {config.model_name}: {reason}"}
+            return {"ok": False, "dead": True, "switched": False,
+                    "model": config.model_name, "detail": reason}
+
+
+# ---------------------------------------------------------------------------
 # Core LLM function
 # ---------------------------------------------------------------------------
 
@@ -248,6 +463,20 @@ def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Option
                 cache_client.record_llm_error(model_id=config.id)
                 cache_client.record_error("llm", str(e), model_id=config.id)
                 log.warning("LLM attempt %d/%d failed: %s", attempt + 1, attempts, e)
+                # A retired model returns the same error however many times it
+                # is asked, so retrying it burns the whole refresh budget (this
+                # is how a 410 went unnoticed for 18 days). Switch models and
+                # retry the article on the replacement instead of counting the
+                # attempt against it.
+                if _is_model_dead(e):
+                    if config.id != "_env":
+                        cache_client.mark_model_dead(config.id, str(e))
+                    promoted = failover_active_model(config.id, str(e))
+                    if promoted is None:
+                        log.error("no healthy LLM model available — skipping article")
+                        return None
+                    client, config = promoted
+                    continue
                 if attempt == attempts - 1:
                     break
         log.error("LLM failed after %d attempts — skipping article", attempts)

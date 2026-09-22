@@ -367,6 +367,95 @@ def set_active_model(model_id: str) -> bool:
         return False
 
 
+def mark_model_dead(model_id: str, reason: str) -> None:
+    """Flag a model as permanently failing so failover stops retrying it.
+
+    Written on a 401/403/404/410 — the statuses that mean the model is gone for
+    this account rather than briefly unwell. The timestamp lets the caller
+    re-test it after a cooldown, since an expired key can be fixed without
+    anything in the registry changing.
+    """
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.hset(f"model:{model_id}", mapping={
+            "health": "dead",
+            "health_reason": (reason or "")[:300],
+            "health_checked_at": str(int(time.time())),
+        })
+    except Exception:
+        pass
+
+
+def clear_model_health(model_id: str) -> None:
+    """Drop the dead mark — the model answered, or an operator edited it."""
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.hdel(f"model:{model_id}", "health", "health_reason", "health_checked_at")
+    except Exception:
+        pass
+
+
+def model_dead_since(model_id: str) -> int | None:
+    """Unix ts the model was marked dead, or None if it is not marked."""
+    r = _get_client()
+    if r is None:
+        return None
+    try:
+        data = r.hmget(f"model:{model_id}", "health", "health_checked_at")
+        if not data or data[0] != "dead":
+            return None
+        return int(data[1] or 0)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Short-lived locks / flags  (SET NX EX)
+# ---------------------------------------------------------------------------
+
+def acquire_lock(name: str, ttl_s: int) -> bool:
+    """Take a named lock, or return False if it is already held.
+
+    Used to keep the API and a concurrently running `scrape.py` from probing
+    every model at the same moment, and to hold a back-off window after a
+    failover sweep finds nothing alive. Redis being unavailable returns True:
+    caching degrades gracefully everywhere else, so a missing lock must not be
+    the thing that blocks a failover.
+    """
+    r = _get_client()
+    if r is None:
+        return True
+    try:
+        return bool(r.set(f"lock:{name}", "1", nx=True, ex=max(1, ttl_s)))
+    except Exception:
+        return True
+
+
+def lock_held(name: str) -> bool:
+    """True while a lock/flag window is still active."""
+    r = _get_client()
+    if r is None:
+        return False
+    try:
+        return bool(r.exists(f"lock:{name}"))
+    except Exception:
+        return False
+
+
+def release_lock(name: str) -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.delete(f"lock:{name}")
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Cron run tracking  (key: "cron:runs" list, bounded to 100)
 # ---------------------------------------------------------------------------
