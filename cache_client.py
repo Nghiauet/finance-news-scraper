@@ -403,6 +403,43 @@ def record_cron_run(
         pass
 
 
+def bump_zero_article_streak() -> int:
+    """Count consecutive refresh cycles that stored nothing; returns the streak.
+
+    A cycle can report every source "ok" and still store zero articles — the
+    sources answered and extraction failed afterwards. That combination hid a
+    retired LLM model for 18 days, so the streak is tracked explicitly instead
+    of being inferred from the run history.
+    """
+    r = _get_client()
+    if r is None:
+        return 0
+    try:
+        return int(r.incr("cron:zero_streak"))
+    except Exception:
+        return 0
+
+
+def clear_zero_article_streak() -> None:
+    r = _get_client()
+    if r is None:
+        return
+    try:
+        r.delete("cron:zero_streak")
+    except Exception:
+        pass
+
+
+def get_zero_article_streak() -> int:
+    r = _get_client()
+    if r is None:
+        return 0
+    try:
+        return int(r.get("cron:zero_streak") or 0)
+    except Exception:
+        return 0
+
+
 def get_cron_runs(limit: int = 50) -> list[dict]:
     r = _get_client()
     if r is None:

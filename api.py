@@ -192,6 +192,31 @@ async def _refresh_all():
         _refresh_running = False
 
 
+def _finish_cycle(started_at: float, duration: float, total: int, ok: int,
+                  articles_total: int, timed_out: bool, note: str = "") -> None:
+    """Record the cycle and alert when it produced nothing.
+
+    A cycle can report every source "ok" and still store zero articles: the
+    sources answered and extraction failed afterwards. Nothing used to notice
+    that combination, which is why a retired LLM model sat unfixed for 18 days
+    while the dashboard showed 13/13 green.
+    """
+    cache_client.record_cron_run(started_at, duration, total, ok, articles_total, timed_out)
+    if articles_total > 0:
+        cache_client.clear_zero_article_streak()
+        return
+    streak = cache_client.bump_zero_article_streak()
+    detail = f" — {note}" if note else ""
+    log.error("[CRON] ALERT: cycle stored 0 articles (%d/%d sources reported ok), "
+              "%d cycle(s) in a row%s", ok, total, streak, detail)
+    cache_client.record_error(
+        "cron",
+        f"Refresh stored 0 articles ({ok}/{total} sources reported ok) — "
+        f"{streak} consecutive empty cycle(s){detail}. The pipeline is producing "
+        f"nothing: check LLM model health at /admin/llm.",
+    )
+
+
 async def _do_refresh():
     sources = list(SOURCES)
     total = len(sources)
@@ -246,7 +271,7 @@ async def _do_refresh():
             log.error("[CRON] [%d/%d] %s — failed: %s", idx, total, source_name, e)
             cache_client.record_error("scrape", str(e), source=source_name)
     duration = time.monotonic() - t_all
-    cache_client.record_cron_run(started_at, duration, total, ok, articles_total, timed_out)
+    _finish_cycle(started_at, duration, total, ok, articles_total, timed_out)
     log.info("[CRON] refresh done — %d/%d sources ok in %.1fs", ok, total, duration)
 
 
@@ -577,7 +602,11 @@ def admin_cache(_user: str = Depends(require_admin)):
 def admin_cron(_user: str = Depends(require_admin)):
     t0 = time.monotonic()
     runs = cache_client.get_cron_runs(limit=50)
-    return {"success": True, "data": {"runs": runs}, "meta": _admin_meta(t0)}
+    return {
+        "success": True,
+        "data": {"runs": runs, "zero_article_streak": cache_client.get_zero_article_streak()},
+        "meta": _admin_meta(t0),
+    }
 
 
 @app.get("/admin/errors")
