@@ -5,15 +5,17 @@ import argparse
 import json
 import logging
 import os
+import re
 import ssl
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import httpx
+import trafilatura
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
@@ -89,7 +91,8 @@ def _sanitize_published_at(value: Optional[str]) -> Optional[str]:
     return value
 
 
-def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
+def fetch_page(url: str, weak_ssl: bool = False) -> Optional[str]:
+    """Fetch a URL and return its HTML, or None on any failure."""
     try:
         if weak_ssl:
             ctx = ssl.create_default_context()
@@ -100,11 +103,32 @@ def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
         else:
             resp = httpx.get(url, headers=HEADERS, timeout=10, follow_redirects=True)
         resp.raise_for_status()
-        return BeautifulSoup(resp.text, "lxml")
+        return resp.text
     except Exception as e:
         log.error("fetch failed %s: %s", url, e)
         cache_client.record_error("scrape", str(e))
         return None
+
+
+def fetch_html(url: str, weak_ssl: bool = False) -> Optional[BeautifulSoup]:
+    html = fetch_page(url, weak_ssl=weak_ssl)
+    return BeautifulSoup(html, "lxml") if html is not None else None
+
+
+def _looks_like_article_url(url: str) -> bool:
+    """True for article URLs, False for section/menu pages.
+
+    Category pages put menu links inside h2/h3 too, and their anchor text is
+    long enough to pass the title-length check. Those pages then went to the
+    LLM, which "summarised" whatever headline happened to be on the listing
+    and published it under the section URL (vneconomy.vn/cong-nghe-startup.htm,
+    kinhtechungkhoan.vn/bao-cao-phan-tich, ...). Vietnamese news URLs carry
+    either a long slug or a numeric article id; section URLs have neither.
+    """
+    path = urlparse(url).path
+    if re.search(r"\d{6,}", path):
+        return True
+    return any(seg.count("-") >= 4 for seg in path.split("/"))
 
 
 def get_article_links(url: str, domain: str, weak_ssl: bool = False,
@@ -125,7 +149,7 @@ def get_article_links(url: str, domain: str, weak_ssl: bool = False,
         # produced "https://domain.vnsome-slug" for any href without a leading
         # slash, which then failed DNS — kinhtechungkhoan lost 17 of 20 links.
         href = urljoin(url, href)
-        if domain in href:
+        if domain in href and _looks_like_article_url(href):
             articles.append({"title": title, "url": href})
 
     seen_urls = set()
@@ -170,20 +194,130 @@ def _extract_next_data(soup: BeautifulSoup) -> Optional[dict]:
     return None
 
 
-def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
-    """Fetch a page and return (visible_text, thumbnail_dict, published_at).
+# Where Vietnamese news CMSes put the publish time, most specific first.
+_DATE_META_ATTRS = [
+    {"property": "article:published_time"},
+    {"name": "article:published_time"},
+    {"itemprop": "datePublished"},
+    {"name": "pubdate"},
+    {"name": "publishdate"},
+    {"property": "og:article:published_time"},
+]
+_LD_DATE_RE = re.compile(r'"datePublished"\s*:\s*"([^"]+)"')
+_ISO_DATE_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{1,2}:\d{2}(?::\d{2})?)(?:\.\d+)?\s*(Z|[+-]\d{2}:?\d{2})?)?$"
+)
+_SLASH_DATE_RE = re.compile(
+    r"(\d{1,2})/(\d{1,2})/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([AaPp][Mm])?)?$"
+)
 
-    published_at is None for generic pages — the LLM extracts the date from the
-    text in that case. Next.js pages (get_page_data_nextjs) carry an authoritative
-    date so they return it here."""
-    soup = fetch_html(url, weak_ssl=weak_ssl)
-    if not soup:
+
+def _normalize_date(raw: str) -> Optional[str]:
+    """Turn a CMS date string into ISO 8601 +07:00, or None if unrecognised.
+
+    Seen in the wild: "2026-09-24T08:07:07+07:00", "2026-09-24T00:05:00" (no
+    zone — VN sites publish local time), "2026-09-24T09:06:00.000 +07:00",
+    "9/24/2026 8:04:01 AM" (US order, always with AM/PM) and "24/09/2026"
+    (VN order)."""
+    s = (raw or "").strip()
+    m = _ISO_DATE_RE.match(s)
+    if m:
+        day, clock, tz = m.groups()
+        clock = clock or "00:00:00"
+        if clock.count(":") == 1:
+            clock += ":00"
+        if len(clock.split(":")[0]) == 1:
+            clock = "0" + clock
+        if tz is None:
+            tz = "+07:00"
+        elif tz == "Z":
+            tz = "+00:00"
+        elif ":" not in tz:
+            tz = f"{tz[:3]}:{tz[3:]}"
+        try:
+            dt = datetime.fromisoformat(f"{day}T{clock}{tz}")
+        except ValueError:
+            return None
+        return dt.astimezone(VN_TZ).strftime("%Y-%m-%dT%H:%M:%S+07:00")
+    m = _SLASH_DATE_RE.match(s)
+    if m:
+        a, b, year, hh, mm, ss, ampm = m.groups()
+        a, b = int(a), int(b)
+        # AM/PM marks the US month-first layout; otherwise day comes first.
+        if a > 12 or (b <= 12 and not ampm):
+            day_n, month = a, b
+        else:
+            month, day_n = a, b
+        hour = int(hh or 0)
+        if ampm:
+            hour = hour % 12 + (12 if ampm.lower() == "pm" else 0)
+        try:
+            dt = datetime(int(year), month, day_n, hour, int(mm or 0), int(ss or 0), tzinfo=VN_TZ)
+        except ValueError:
+            return None
+        return dt.strftime("%Y-%m-%dT%H:%M:%S+07:00")
+    return None
+
+
+def _extract_published_at(soup: BeautifulSoup) -> Optional[str]:
+    """The CMS's own publish time from meta tags or JSON-LD, if the page has one.
+
+    This beats the LLM's reading of the body, which can pick up a date the
+    article merely mentions (see _sanitize_published_at)."""
+    for attrs in _DATE_META_ATTRS:
+        tag = soup.find("meta", attrs=attrs)
+        if tag and tag.get("content"):
+            value = _normalize_date(tag["content"])
+            if value:
+                return value
+    for script in soup.find_all("script", type="application/ld+json"):
+        m = _LD_DATE_RE.search(script.string or "")
+        if m:
+            value = _normalize_date(m.group(1))
+            if value:
+                return value
+    return None
+
+
+# Below this, trafilatura probably missed the body (video/gallery layouts) and
+# the whole-page text is the better bet.
+_MIN_MAIN_TEXT = 300
+
+
+def _extract_main_text(html: str, soup: BeautifulSoup) -> str:
+    """Article body without menus, sidebars and related-article lists.
+
+    The whole-page text was 30-70% boilerplate: other articles' headlines that
+    the LLM could mistake for this story, plus tokens paid for on every call."""
+    try:
+        text = trafilatura.extract(html, include_comments=False, include_tables=True) or ""
+    except Exception as e:
+        log.warning("trafilatura failed: %s", e)
+        text = ""
+    if len(text) < _MIN_MAIN_TEXT:
+        for tag in soup.select("script, style, nav, footer, header, aside"):
+            tag.decompose()
+        return "\n".join(line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip())
+    # trafilatura often drops the headline; the LLM needs it for context.
+    og_title = soup.find("meta", property="og:title")
+    headline = (og_title.get("content") or "").strip() if og_title else ""
+    if headline and headline not in text[:500]:
+        text = f"{headline}\n{text}"
+    return text
+
+
+def get_page_data(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """Fetch a page and return (article_text, thumbnail_dict, published_at).
+
+    published_at comes from the page's metadata when present; it is None
+    otherwise and the LLM's extraction is used instead."""
+    html = fetch_page(url, weak_ssl=weak_ssl)
+    if html is None:
         return None, None, None
+    soup = BeautifulSoup(html, "lxml")
     thumbnail = _extract_thumbnail(soup)
-    for tag in soup.select("script, style, nav, footer, header, aside"):
-        tag.decompose()
-    lines = [line for line in soup.get_text(separator="\n", strip=True).splitlines() if line.strip()]
-    return "\n".join(lines), thumbnail, None
+    published_at = _extract_published_at(soup)
+    return _extract_main_text(html, soup), thumbnail, published_at
 
 
 def get_page_data_nextjs(url: str, weak_ssl: bool = False) -> tuple[Optional[str], Optional[dict], Optional[str]]:
@@ -245,6 +379,10 @@ SOURCES = {
         "nextjs": True,
     },
 }
+
+# Shorter than this after extraction means a paywall, video or error page —
+# not worth an LLM call.
+_MIN_ARTICLE_TEXT = 200
 
 
 def scrape_source(
@@ -312,6 +450,9 @@ def scrape_source(
             page_text, thumbnail, page_published_at = get_page_data(url, weak_ssl=weak_ssl)
         if not page_text:
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
+            continue
+        if len(page_text) < _MIN_ARTICLE_TEXT:
+            log.warning("[%s] [%s] only %d chars of text — skipping", source_name, n, len(page_text))
             continue
 
         now = cache_client.vn_now_iso()
