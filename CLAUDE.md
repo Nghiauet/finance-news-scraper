@@ -50,6 +50,7 @@ Optional overrides:
 | `LLM_MAX_INPUT_CHARS` | 32000 | Max chars sent to LLM per article |
 | `LLM_MAX_OUTPUT_TOKENS` | 8192 | Max completion tokens per LLM call (too low → truncated JSON; bilingual output is ~2x longer) |
 | `LLM_CALL_DELAY` | 2 | Seconds to sleep between LLM calls (rate limiting) |
+| `LLM_DISABLE_THINKING` | 1 | Send `chat_template_kwargs.enable_thinking=false` so reasoning models (nemotron) skip the hidden reasoning pass — ~70% fewer tokens, 3–5x faster. Endpoints that reject it fall back to plain requests automatically |
 
 ## Architecture
 

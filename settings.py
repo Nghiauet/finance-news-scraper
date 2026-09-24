@@ -15,6 +15,11 @@ _DEFAULTS = {
     "llm_max_output_tokens": {"env": "LLM_MAX_OUTPUT_TOKENS", "default": 8192, "type": int, "min": 256},
     "refresh_timeout": {"env": "REFRESH_TIMEOUT", "default": 1800, "type": int, "min": 60},
     "cache_ttl_hours": {"env": "CACHE_TTL_HOURS", "default": 72, "type": int, "min": 1},
+    # 1 = ask reasoning models (nemotron) to answer without a hidden reasoning
+    # pass. Measured on nemotron-3-super: ~70% fewer completion tokens and 3-5x
+    # faster with equally valid JSON, and no more runs out of max_tokens mid-
+    # reasoning. Endpoints that reject the parameter fall back automatically.
+    "llm_disable_thinking": {"env": "LLM_DISABLE_THINKING", "default": 1, "type": int, "min": 0, "max": 1},
 }
 
 _REDIS_KEY = "settings:general"
@@ -97,6 +102,8 @@ def validate_setting(name: str, value):
         raise ValueError(f"expected {type_name}, got NaN")
     if cast_value < info["min"]:
         raise ValueError(f"must be >= {info['min']}, got {cast_value}")
+    if "max" in info and cast_value > info["max"]:
+        raise ValueError(f"must be <= {info['max']}, got {cast_value}")
     return cast_value
 
 

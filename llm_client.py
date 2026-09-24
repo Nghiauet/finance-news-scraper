@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from openai import APIStatusError, OpenAI
+from openai import APIStatusError, BadRequestError, OpenAI
 from pydantic import BaseModel, field_validator
 
 import cache_client
@@ -289,7 +289,8 @@ def _probe_extraction(config_data: dict) -> tuple[bool, str, bool]:
         return False, "incomplete model config (base_url/api_key/model_name)", False
     try:
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=_PROBE_TIMEOUT)
-        resp = client.chat.completions.create(
+        resp = _create_completion(
+            client, config_data.get("id") or model_name,
             model=model_name,
             messages=[
                 {"role": "system", "content": _system_prompt()},
@@ -313,6 +314,40 @@ def _probe_extraction(config_data: dict) -> tuple[bool, str, bool]:
         return True, f"extracted {len(extraction.content or '')} chars, tickers={extraction.tickers}", False
     except Exception as e:
         return False, f"{type(e).__name__}: {e}", _is_model_dead(e)
+
+
+# vLLM/NIM chat-template switch that turns off the hidden reasoning pass.
+_NO_THINKING = {"chat_template_kwargs": {"enable_thinking": False}}
+
+# Model ids whose endpoint rejected _NO_THINKING; they get plain requests from
+# then on. Process-local on purpose: a restart re-checks, which is cheap.
+_thinking_switch_rejected: set[str] = set()
+
+
+def _thinking_disabled() -> bool:
+    import settings as settings_mod
+    try:
+        return bool(settings_mod.get_setting("llm_disable_thinking"))
+    except Exception:
+        return False
+
+
+def _create_completion(client: OpenAI, model_id: str, **kwargs):
+    """chat.completions.create, with reasoning switched off when configured.
+
+    An endpoint that does not know chat_template_kwargs answers 400; the call
+    is then repeated without it and the model remembered, so enabling the
+    setting can never take a working model out of service."""
+    if not _thinking_disabled() or model_id in _thinking_switch_rejected:
+        return client.chat.completions.create(**kwargs)
+    try:
+        return client.chat.completions.create(extra_body=_NO_THINKING, **kwargs)
+    except BadRequestError as e:
+        if "chat_template_kwargs" not in str(e) and "enable_thinking" not in str(e):
+            raise
+        log.warning("model %s rejects enable_thinking=false — sending plain requests: %s", model_id, e)
+        _thinking_switch_rejected.add(model_id)
+        return client.chat.completions.create(**kwargs)
 
 
 def _probe_max_tokens() -> int:
@@ -487,7 +522,8 @@ def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Option
                 call_timeout = None
             try:
                 t0 = time.monotonic()
-                resp = client.chat.completions.create(
+                resp = _create_completion(
+                    client, config.id,
                     model=config.model_name,
                     messages=[
                         {"role": "system", "content": _SYSTEM_PROMPT.format(today=datetime.now(cache_client.VN_TZ).date().isoformat())},
