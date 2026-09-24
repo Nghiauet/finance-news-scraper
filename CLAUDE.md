@@ -58,10 +58,14 @@ Two modes: **CLI batch scraper** (`scrape.py`) and **FastAPI server** (`api.py`)
 ### Data flow
 
 ```
-category page → article links (h2/h3/h4 a selectors) → page text + OG thumbnail → LLM extract+summarize → Redis / JSON
+category page → article links (h2/h3/h4 a selectors, filtered to article-shaped URLs) → main text (trafilatura) + OG thumbnail + CMS publish date (meta/JSON-LD) → LLM extract+summarize → Redis / JSON
 ```
 
-No per-source parsing logic. The LLM handles all extraction (title, date, summary, content, tickers, relevance) **plus an English translation of title/summary/content** in one call with a Vietnamese-language system prompt. LLM output is validated via Pydantic (`ArticleExtraction` in `llm_client.py`). Tickers stay Vietnamese-only regardless of requested API language.
+No per-source parsing logic. The LLM handles all extraction (title, date, summary, key points, content, tickers, category, relevance) **plus an English translation of title/summary/key points/content** in one call with a Vietnamese-language system prompt. LLM output is validated via Pydantic (`ArticleExtraction` in `llm_client.py`); an extraction containing CJK/kana/Hangul characters is retried, and stripped on the final attempt. Tickers and `category` stay language-agnostic.
+
+- **Link filter**: `_looks_like_article_url` keeps URLs with a long slug (≥4 hyphens in a segment) or a ≥6-digit id. Without it, menu links inside h2/h3 reached the LLM and were published as fake articles.
+- **Publish date**: the CMS date from meta tags / JSON-LD (`_extract_published_at`) wins over the LLM's guess; the LLM date is only a fallback.
+- **Sources** (`SOURCES` in `scrape.py`): 13 stock-market desks plus 10 topic sources (cafef macro/banking/real-estate/world sections, markettimes, vietnamplus, baochinhphu, vietnamfinance, tuoitre, bnews). A source's optional `limit` caps it below `articles_per_source` to keep the LLM budget inside the refresh window. Several sources may share a domain — the article cache records `source_name` so rebuilds put each article back in the right list.
 
 ### Module roles
 
@@ -75,7 +79,7 @@ No per-source parsing logic. The LLM handles all extraction (title, date, summar
 | Endpoint | Description |
 |---|---|
 | `GET /health` | Health check (`{"status": "ok"}`) |
-| `GET /news` | List articles. Params: `source`, `limit` (1–100, default 20), `cursor` (pagination by article id), `sort`, `q`, `language` (`vi` default, `en`, `all`) |
+| `GET /news` | List articles. Params: `source`, `limit` (1–100, default 20), `cursor` (pagination by article id), `sort`, `q`, `category` (comma-separated, see below; unknown → 400), `language` (`vi` default, `en`, `all`) |
 | `GET /news/{id}` | Single article detail (includes `content` field). Param: `language` (`vi` default, `en`, `all`) |
 
 - `id`: stable 18-digit numeric string from `sha256(url) % 10^18`
@@ -86,20 +90,23 @@ No per-source parsing logic. The LLM handles all extraction (title, date, summar
 
 ### Article schema
 
-`{ id, title, url, source, published_at, summary, tickers, thumbnail, content, language }`
+`{ id, title, url, source, published_at, summary, key_points, category, tickers, thumbnail, content, language }`
 
 - `published_at`: ISO 8601 with `+07:00` timezone or `null`
 - `source`: canonical domain (e.g. `cafef.vn`)
 - `thumbnail`: `{ url, width?, height?, alt? }` from Open Graph meta tags
 - `content`: markdown-formatted full article text (rewritten by LLM)
 - `tickers`: list of Vietnamese stock ticker symbols (2–5 uppercase chars), language-agnostic
+- `summary`: at most 2 short sentences (~45 words) — what happened, then why it matters
+- `key_points`: 2–4 one-line takeaways in the response language (`language=all` also returns `key_points_en`)
+- `category`: one of `stocks, companies, banking, macro, real_estate, commodities, world, crypto, other` (`CATEGORIES` in `llm_client.py`); `null` for articles cached before categories existed
 - `language`: `"vi"` or `"en"` — the language of the fields in this response (mirrors the request param)
 
 ### Redis cache keys
 
 | Key pattern | Content | TTL |
 |---|---|---|
-| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant, title_en, summary_en, content_en}` | 3d |
+| `article:<url>` | `{title, published_at, summary, tickers, thumbnail, content, is_relevant, title_en, summary_en, content_en, category, key_points, key_points_en, source_name}` | 3d |
 | `summary:<sha256>` | LLM JSON result (keyed by sha256 of page text); includes both VI and EN fields | 3d |
 | `news:<source>` | Full article list JSON per source (each entry carries both VI and EN fields) | 3d |
 

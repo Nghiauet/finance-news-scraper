@@ -36,7 +36,6 @@ def vn_now_iso() -> str:
     return datetime.now(VN_TZ).strftime("%Y-%m-%dT%H:%M:%S+07:00")
 
 
-
 def _get_cache_ttl() -> int:
     """Read cache_ttl_hours from Redis settings, convert to seconds.
     Reads directly from Redis to avoid circular import with settings module."""
@@ -105,6 +104,10 @@ def set_article(
     title_en: str | None = None,
     summary_en: str | None = None,
     content_en: str | None = None,
+    category: str | None = None,
+    key_points: list | None = None,
+    key_points_en: list | None = None,
+    source_name: str | None = None,
 ) -> None:
     r = _get_client()
     if r is None:
@@ -122,6 +125,13 @@ def set_article(
                 "title_en": title_en,
                 "summary_en": summary_en,
                 "content_en": content_en,
+                "category": category,
+                "key_points": key_points or [],
+                "key_points_en": key_points_en or [],
+                # Several sources can share a domain (cafef has four sections),
+                # so the domain alone no longer says which list an article
+                # belongs to when news lists are rebuilt.
+                "source_name": source_name,
                 "scraped_at": vn_now_iso(),
             },
             ensure_ascii=False,
@@ -715,8 +725,12 @@ def rebuild_news_from_articles(sources: dict) -> int:
 
     # Group articles by source domain
     by_source: dict[str, list[dict]] = {}
-    # Invert sources dict: domain -> source_name
-    domain_to_name = {cfg["domain"]: name for name, cfg in sources.items()}
+    # Invert sources dict: domain -> source_name. Where several sources share
+    # a domain, the first registered one (the original desk) takes articles
+    # cached before source_name was recorded.
+    domain_to_name: dict[str, str] = {}
+    for name, cfg in sources.items():
+        domain_to_name.setdefault(cfg["domain"], name)
 
     for key in article_keys:
         try:
@@ -725,18 +739,18 @@ def rebuild_news_from_articles(sources: dict) -> int:
                 continue
             data = json.loads(raw)
             url = key.removeprefix("article:")
-            # Determine source from URL domain
-            source_name = None
-            for domain, name in domain_to_name.items():
-                if domain in url:
-                    source_name = name
-                    break
+            # Determine source: recorded name first, then the URL's domain
+            source_name = data.get("source_name")
+            if source_name not in sources:
+                source_name = None
+                for domain, name in domain_to_name.items():
+                    if domain in url:
+                        source_name = name
+                        break
             if not source_name:
                 continue
             data["url"] = url
-            data["source"] = next(
-                (d for d in domain_to_name if d in url), ""
-            )
+            data["source"] = sources[source_name]["domain"]
             by_source.setdefault(source_name, []).append(data)
         except Exception:
             continue

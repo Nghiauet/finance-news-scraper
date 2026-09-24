@@ -42,6 +42,9 @@ class Article:
     title_en: Optional[str] = None
     summary_en: Optional[str] = None
     content_en: Optional[str] = None
+    category: Optional[str] = None
+    key_points: list = field(default_factory=list)
+    key_points_en: list = field(default_factory=list)
 
 
 HEADERS = {
@@ -378,6 +381,20 @@ SOURCES = {
         "selectors": 'a[href^="/tin-tuc/"]',
         "nextjs": True,
     },
+    # Topic sources, added for breadth: the sources above are almost all
+    # stock-market desks. `limit` caps them below articles_per_source so that
+    # the LLM budget (one call per new article, ~25s each) stays inside the
+    # refresh window with 23 sources instead of 13.
+    "cafef_vimo": {"url": "https://cafef.vn/vi-mo-dau-tu.chn", "domain": "cafef.vn", "limit": 10},
+    "cafef_nganhang": {"url": "https://cafef.vn/tai-chinh-ngan-hang.chn", "domain": "cafef.vn", "limit": 10},
+    "cafef_batdongsan": {"url": "https://cafef.vn/bat-dong-san.chn", "domain": "cafef.vn", "limit": 10},
+    "cafef_quocte": {"url": "https://cafef.vn/tai-chinh-quoc-te.chn", "domain": "cafef.vn", "limit": 10},
+    "markettimes": {"url": "https://markettimes.vn/", "domain": "markettimes.vn", "limit": 10},
+    "vietnamplus": {"url": "https://www.vietnamplus.vn/kinhte/", "domain": "vietnamplus.vn", "limit": 10},
+    "baochinhphu": {"url": "https://baochinhphu.vn/kinh-te.htm", "domain": "baochinhphu.vn", "limit": 10},
+    "vietnamfinance": {"url": "https://vietnamfinance.vn/", "domain": "vietnamfinance.vn", "limit": 10},
+    "tuoitre": {"url": "https://tuoitre.vn/kinh-doanh.htm", "domain": "tuoitre.vn", "limit": 10},
+    "bnews": {"url": "https://bnews.vn/", "domain": "bnews.vn", "limit": 10},
 }
 
 # Shorter than this after extraction means a paywall, video or error page —
@@ -405,6 +422,7 @@ def scrape_source(
     t_source = time.monotonic()
     log.info("[%s] scraping started", source_name)
 
+    limit = min(limit, source.get("limit", limit))
     selectors = source.get("selectors", "h2 a, h3 a, h4 a")
     is_nextjs = source.get("nextjs", False)
 
@@ -438,6 +456,9 @@ def scrape_source(
                 title_en=cached.get("title_en"),
                 summary_en=cached.get("summary_en"),
                 content_en=cached.get("content_en"),
+                category=cached.get("category"),
+                key_points=cached.get("key_points") or [],
+                key_points_en=cached.get("key_points_en") or [],
             )
             results.append(article)
             continue
@@ -475,6 +496,9 @@ def scrape_source(
                 title_en=parsed.get("title_en"),
                 summary_en=parsed.get("summary_en"),
                 content_en=parsed.get("content_en"),
+                category=parsed.get("category"),
+                key_points=parsed.get("key_points") or [],
+                key_points_en=parsed.get("key_points_en") or [],
             )
             if not dry_run:
                 cache_client.set_article(
@@ -484,6 +508,10 @@ def scrape_source(
                     title_en=article.title_en,
                     summary_en=article.summary_en,
                     content_en=article.content_en,
+                    category=article.category,
+                    key_points=article.key_points,
+                    key_points_en=article.key_points_en,
+                    source_name=source_name,
                 )
             results.append(article)
             log.info("[%s] [%s] done — published_at=%s", source_name, n, article.published_at)
@@ -531,6 +559,9 @@ def _flush_news(source_name: str, results: list[Article], *, merge: bool = False
             "title_en": a.title_en,
             "summary_en": a.summary_en,
             "content_en": a.content_en,
+            "category": a.category,
+            "key_points": a.key_points,
+            "key_points_en": a.key_points_en,
         }
         for a in results
     ]

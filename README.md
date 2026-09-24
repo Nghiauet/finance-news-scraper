@@ -4,7 +4,8 @@ Vietnamese finance news scraper + FastAPI server. Pulls articles from 13 Vietnam
 
 ## What it does
 
-- Scrapes category pages from 13 sources (cafef, vnexpress, tinnhanhchungkhoan, vietnambiz, vietstock, dantri, thanhnien, vneconomy, kinhtechungkhoan, thoibaonganhang, cafebiz, nguoiquansat, stockbiz)
+- Scrapes category pages from 23 sources: 13 stock-market desks (cafef, vnexpress, tinnhanhchungkhoan, vietnambiz, vietstock, dantri, thanhnien, vneconomy, kinhtechungkhoan, thoibaonganhang, cafebiz, nguoiquansat, stockbiz) plus topic sources for macro, banking, real estate, world markets and commodities (cafef sections, markettimes, vietnamplus, baochinhphu, vietnamfinance, tuoitre, bnews)
+- Each article gets a short plain-language summary, 2–4 key points and a topic `category` (filter with `GET /news?category=macro,banking`)
 - Sends each article's page text to an OpenAI-compatible LLM, which returns title, publish date, summary, full markdown content, tickers, and a relevance flag in one call
 - Caches articles, LLM results, and per-source news lists in Redis (3-day TTL by default)
 - Serves a paginated `/news` endpoint with round-robin interleaving across sources

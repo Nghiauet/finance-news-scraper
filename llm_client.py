@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Optional
 
 from openai import APIStatusError, OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 import cache_client
 
@@ -53,45 +53,65 @@ _PROBE_ARTICLE = (
     "Khối ngoại mua ròng 450 tỷ đồng, thanh khoản toàn sàn đạt 18.500 tỷ đồng."
 )
 
-_SYSTEM_PROMPT = """Bạn là nhà phân tích tin tức tài chính Việt Nam. Đọc bài báo và trả về JSON song ngữ Việt-Anh với 9 trường sau.
+# Stable, language-agnostic topic slugs (like tickers, they are not translated).
+CATEGORIES = (
+    "stocks",       # thị trường chứng khoán, chỉ số, dòng tiền, khối ngoại
+    "companies",    # doanh nghiệp: kết quả kinh doanh, cổ tức, M&A, lãnh đạo mua/bán
+    "banking",      # ngân hàng, lãi suất, tín dụng, tỷ giá, trái phiếu
+    "macro",        # vĩ mô, chính sách, thuế, GDP, xuất nhập khẩu, đầu tư công
+    "real_estate",  # bất động sản, hạ tầng, dự án
+    "commodities",  # vàng, dầu, nông sản, kim loại, hàng hóa
+    "world",        # kinh tế, thị trường tài chính quốc tế
+    "crypto",       # tiền số, tài sản số
+    "other",
+)
 
-Hôm nay là {today}. Chỉ trích xuất thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm từ kiến thức bên ngoài.
+_SYSTEM_PROMPT = """Bạn là biên tập viên tin tài chính Việt Nam, viết cho nhà đầu tư cá nhân bận rộn. Đọc bài báo và trả về JSON song ngữ Việt-Anh với 12 trường sau.
+
+Hôm nay là {today}. Chỉ dùng thông tin có trong bài — KHÔNG bịa đặt, KHÔNG thêm từ kiến thức bên ngoài.
+
+NGÔN NGỮ: Các trường tiếng Việt chỉ viết tiếng Việt; các trường *_en chỉ viết tiếng Anh. TUYỆT ĐỐI KHÔNG dùng chữ Hán, chữ Nhật, chữ Hàn, hay chen từ tiếng Pháp/Đức/Trung vào câu.
 
 ## 1. title (tiếng Việt)
-Viết lại tiêu đề rõ ràng, súc tích, dưới 100 ký tự. Nêu bật: ai, cái gì, con số quan trọng nhất. Không sao chép nguyên tiêu đề gốc.
+Viết lại tiêu đề rõ ràng, dưới 90 ký tự: ai, làm gì, con số quan trọng nhất. Không giật tít, không đặt câu hỏi, không sao chép nguyên tiêu đề gốc.
 
 ## 2. published_at
 Ngày ĐĂNG BÀI (không phải ngày được nhắc trong nội dung). ISO 8601 với múi giờ +07:00. Nếu chỉ có ngày → T00:00:00+07:00. KHÔNG được muộn hơn hôm nay ({today}) — nếu ngày duy nhất tìm được nằm trong tương lai, hoặc không tìm thấy ngày đăng rõ ràng → null.
 
 ## 3. summary (tiếng Việt)
-Tóm tắt ngắn gọn 1-2 câu, chỉ giữ lại thông tin quan trọng nhất: sự kiện chính, con số nổi bật (giá, %, giá trị giao dịch). Viết dạng văn xuôi, KHÔNG dùng markdown/emojis/bullet points. Người đọc phải hiểu ngay nội dung mà không cần đọc bài.
+Tối đa 2 câu ngắn, tổng cộng không quá 45 từ, dễ đọc như lời kể với bạn bè:
+- Câu 1: chuyện gì vừa xảy ra — chủ thể, hành động, 1-2 con số quan trọng nhất.
+- Câu 2 (chỉ khi bài có nêu): vì sao đáng chú ý hoặc tác động tới nhà đầu tư/người dân.
+Câu chủ động, từ ngữ thông dụng; thuật ngữ chuyên môn phải kèm giải thích ngắn (ví dụ: "bán ròng — bán nhiều hơn mua"). Không liệt kê dài, không markdown/emoji/bullet.
 
-## 4. content (tiếng Việt)
+## 4. key_points (tiếng Việt)
+Mảng 2-4 ý chính, mỗi ý một câu ngắn (≤ 20 từ), ý quan trọng nhất đứng đầu, mỗi ý có thông tin mới (con số, mốc thời gian, tên doanh nghiệp). Không lặp lại nguyên văn summary. Không dùng ký tự gạch đầu dòng trong chuỗi.
+
+## 5. content (tiếng Việt)
 Tóm tắt nội dung bài báo dạng markdown, tập trung vào thông tin có giá trị cho nhà đầu tư:
 - Sự kiện chính và con số cụ thể (giữ nguyên số liệu, không làm tròn)
 - Nguyên nhân/bối cảnh (nếu có)
 - Nhận định chuyên gia (nếu có, dùng > blockquote)
 - Dùng **in đậm** cho con số và mã cổ phiếu quan trọng
 - Dùng bảng markdown nếu có nhiều số liệu so sánh
+- Đoạn văn ngắn (2-3 câu)
 - Bỏ qua thông tin không có giá trị: quảng cáo, lời dẫn dắt rườm rà, nội dung lặp lại
-- Viết ngắn gọn, đi thẳng vào trọng tâm. Độ dài tỷ lệ với lượng thông tin có giá trị trong bài.
+- TỐI ĐA 250 từ; bài ít thông tin thì ngắn hơn.
 
-## 5. title_en (bản dịch tiếng Anh của `title`)
-Dịch ý sang tiếng Anh tự nhiên, ngắn gọn, phù hợp độc giả là nhà đầu tư quốc tế. KHÔNG dịch word-by-word. Giữ nguyên tên riêng tiếng Việt (ví dụ: "Vinamilk", "Hòa Phát") và mã cổ phiếu (HPG, VNM). Dưới 100 ký tự.
+## 6. title_en, 7. summary_en, 8. key_points_en, 9. content_en (bản tiếng Anh của title, summary, key_points, content)
+Dịch ý sang tiếng Anh tự nhiên như bản tin tài chính tiếng Anh chuyên nghiệp, KHÔNG dịch word-by-word. Giữ nguyên số liệu, tên riêng tiếng Việt (ví dụ: "Vinamilk", "Hòa Phát") và mã cổ phiếu (HPG, VNM); tỷ đồng → "billion VND"/"trillion VND". title_en dưới 90 ký tự; summary_en tối đa 2 câu, không markdown; key_points_en có cùng số ý với key_points; content_en GIỮ NGUYÊN cấu trúc markdown của content.
 
-## 6. summary_en (bản dịch tiếng Anh của `summary`)
-Văn xuôi tự nhiên, 1-2 câu, KHÔNG markdown/emoji/bullet. Giữ nguyên số liệu, đơn vị tiền tệ (VND, USD, tỷ đồng → "trillion VND"/"billion VND" hoặc giữ nguyên), tên riêng và mã cổ phiếu. Phong cách phải tự nhiên như một bản tin tài chính tiếng Anh, không phải dịch máy.
-
-## 7. content_en (bản dịch tiếng Anh của `content`)
-GIỮ NGUYÊN cấu trúc markdown (**bold**, > blockquote, bảng, danh sách) khớp với trường `content`. Dịch ý, không dịch từng từ. Giữ nguyên số liệu, mã cổ phiếu, tên công ty Việt Nam. Phong cách: bản tin tài chính tiếng Anh chuyên nghiệp dành cho nhà đầu tư.
-
-## 8. tickers
+## 10. tickers
 Mã cổ phiếu Việt Nam (2-5 ký tự IN HOA) được nhắc trực tiếp hoặc suy ra rõ ràng (ví dụ: "Vinamilk" → VNM). Trả về [] nếu không có. KHÔNG dịch — luôn dùng mã gốc.
 
-## 9. is_relevant
+## 11. category
+Đúng MỘT giá trị trong danh sách, theo chủ đề chính của bài:
+stocks (thị trường chứng khoán, chỉ số, dòng tiền) | companies (doanh nghiệp: kết quả kinh doanh, cổ tức, M&A, lãnh đạo mua/bán cổ phiếu) | banking (ngân hàng, lãi suất, tín dụng, tỷ giá, trái phiếu) | macro (vĩ mô, chính sách, thuế, GDP, xuất nhập khẩu) | real_estate (bất động sản, hạ tầng) | commodities (vàng, dầu, nông sản, hàng hóa) | world (kinh tế, thị trường quốc tế) | crypto (tiền số) | other
+
+## 12. is_relevant
 true nếu liên quan tài chính/đầu tư/chứng khoán/kinh tế. false nếu tin xã hội/giải trí/thể thao/đời sống. Nghi ngờ → true.
 
-LƯU Ý: Trả về MỘT JSON object phẳng (KHÔNG lồng), gồm đủ 9 trường: title, published_at, summary, content, title_en, summary_en, content_en, tickers, is_relevant."""
+LƯU Ý: Trả về MỘT JSON object phẳng (KHÔNG lồng), gồm đủ 12 trường: title, published_at, summary, key_points, content, title_en, summary_en, key_points_en, content_en, tickers, category, is_relevant."""
 
 
 class ArticleExtraction(BaseModel):
@@ -104,6 +124,54 @@ class ArticleExtraction(BaseModel):
     title_en: Optional[str] = None
     summary_en: Optional[str] = None
     content_en: Optional[str] = None
+    category: str = "other"
+    key_points: list[str] = []
+    key_points_en: list[str] = []
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def _known_category(cls, v):
+        slug = str(v or "").strip().lower().replace("-", "_").replace(" ", "_")
+        return slug if slug in CATEGORIES else "other"
+
+    @field_validator("key_points", "key_points_en", mode="before")
+    @classmethod
+    def _clean_points(cls, v):
+        # Models sometimes return one newline-separated string instead of a list.
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v = v.splitlines()
+        if not isinstance(v, list):
+            return []
+        points = [re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", str(p)).strip() for p in v]
+        return [p for p in points if p][:5]
+
+
+# Kana, CJK ideographs and Hangul. nemotron slips these into Vietnamese text
+# ("phạt tổng计 157,5 triệu đồng") in ~6% of extractions.
+_FOREIGN_SCRIPT_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff]")
+_TEXT_FIELDS = ("title", "summary", "content", "title_en", "summary_en", "content_en")
+_LIST_FIELDS = ("key_points", "key_points_en")
+
+
+def _foreign_script_fields(result: dict) -> list[str]:
+    """Names of text fields containing characters from a foreign script."""
+    bad = [f for f in _TEXT_FIELDS if _FOREIGN_SCRIPT_RE.search(result.get(f) or "")]
+    bad += [f for f in _LIST_FIELDS if any(_FOREIGN_SCRIPT_RE.search(p) for p in result.get(f) or [])]
+    return bad
+
+
+def _strip_foreign_script(result: dict) -> dict:
+    """Last resort once retries are spent: drop the stray characters."""
+    for f in _TEXT_FIELDS:
+        if result.get(f):
+            cleaned = _FOREIGN_SCRIPT_RE.sub("", result[f])
+            # Markdown fields keep their spacing (indents, hard line breaks).
+            result[f] = cleaned if f.startswith("content") else re.sub(r" {2,}", " ", cleaned)
+    for f in _LIST_FIELDS:
+        result[f] = [_FOREIGN_SCRIPT_RE.sub("", p).strip() for p in result.get(f) or []]
+    return result
 
 
 @dataclass
@@ -390,10 +458,10 @@ def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Option
     if cached:
         try:
             cached_obj = json.loads(cached)
-            if isinstance(cached_obj, dict) and cached_obj.get("title_en"):
+            if isinstance(cached_obj, dict) and cached_obj.get("title_en") and cached_obj.get("key_points"):
                 log.debug("Summary cache hit")
                 return cached_obj
-            log.info("Summary cache hit (legacy, missing EN) — calling LLM to upgrade")
+            log.info("Summary cache hit (legacy format) — calling LLM to upgrade")
         except (json.JSONDecodeError, TypeError):
             log.info("Summary cache hit (unparseable) — calling LLM to upgrade")
 
@@ -447,6 +515,12 @@ def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Option
                     )
                 extraction = _sanitize_and_parse_json(raw)
                 result = extraction.model_dump()
+                leaked = _foreign_script_fields(result)
+                if leaked:
+                    if attempt < attempts - 1:
+                        raise ValueError(f"foreign-script characters in {', '.join(leaked)}")
+                    log.warning("foreign-script characters in %s on final attempt — stripping", leaked)
+                    result = _strip_foreign_script(result)
                 cache_client.set_summary(text, json.dumps(result, ensure_ascii=False))
                 usage = resp.usage
                 if usage:

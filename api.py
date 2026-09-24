@@ -75,6 +75,9 @@ def _resolve_article(raw: dict, language: str) -> Optional[dict]:
             "thumbnail": raw.get("thumbnail"),
             "content": raw.get("content"),
             "content_en": raw.get("content_en"),
+            "key_points": raw.get("key_points") or [],
+            "key_points_en": raw.get("key_points_en") or [],
+            "category": raw.get("category"),
             "scraped_at": raw.get("scraped_at"),
             "language": "all",
         }
@@ -84,10 +87,12 @@ def _resolve_article(raw: dict, language: str) -> Optional[dict]:
             return None
         summary = raw.get("summary_en")
         content = raw.get("content_en")
+        key_points = raw.get("key_points_en") or []
     else:
         title = raw.get("title", "")
         summary = raw.get("summary")
         content = raw.get("content")
+        key_points = raw.get("key_points") or []
     return {
         "id": _make_id(url),
         "title": title,
@@ -98,6 +103,8 @@ def _resolve_article(raw: dict, language: str) -> Optional[dict]:
         "tickers": raw.get("tickers", []),
         "thumbnail": raw.get("thumbnail"),
         "content": content,
+        "key_points": key_points,
+        "category": raw.get("category"),
         "scraped_at": raw.get("scraped_at"),
         "language": language,
     }
@@ -129,6 +136,10 @@ class ArticleItem(BaseModel):
     title_en: Optional[str] = None
     summary_en: Optional[str] = None
     content_en: Optional[str] = None
+    # null for articles cached before categories existed (they expire with the cache TTL).
+    category: Optional[str] = None
+    key_points: list[str] = []
+    key_points_en: Optional[list[str]] = None
 
 
 class Pagination(BaseModel):
@@ -358,6 +369,10 @@ def get_news(
     cursor: Optional[str] = Query(default=None, description="Pagination cursor (id of last item)."),
     sort: Optional[str] = Query(default="newest", description="Sort: newest, oldest, recent (by scrape time)."),
     q: Optional[str] = Query(default=None, description="Search query (title, summary, tickers)."),
+    category: Optional[str] = Query(
+        default=None,
+        description=f"Filter by topic, comma-separated: {', '.join(llm_client.CATEGORIES)}.",
+    ),
     language: str = Query(
         default="vi",
         description="Response language: 'vi' (default) or 'en'.",
@@ -369,6 +384,17 @@ def get_news(
 
     if source and source not in SOURCES:
         raise HTTPException(status_code=400, detail=f"Unknown source '{source}'.")
+
+    categories: set[str] = set()
+    if category is not None:
+        categories = {c.strip().lower() for c in category.split(",") if c.strip()}
+        unknown = categories - set(llm_client.CATEGORIES)
+        if not categories or unknown:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown category '{', '.join(sorted(unknown)) or category}'. "
+                       f"Valid: {', '.join(llm_client.CATEGORIES)}.",
+            )
 
     sources_to_query = [source] if source else list(SOURCES)
 
@@ -400,6 +426,9 @@ def get_news(
             seen_titles.add(title_key)
             deduped.append(a)
     normalized = deduped
+
+    if categories:
+        normalized = [a for a in normalized if a.get("category") in categories]
 
     # Search filter
     if q:
