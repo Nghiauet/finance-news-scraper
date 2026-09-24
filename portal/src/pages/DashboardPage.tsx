@@ -18,6 +18,49 @@ function formatCronTime(ts: number) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+interface SourceRow {
+  name: string
+  domain: string
+  article_count: number
+  last_scraped_at?: string | null
+}
+
+/** Compact age, e.g. "14 min ago" / "3.5h ago" / "2d ago". */
+function relTime(iso?: string | null): string {
+  if (!iso) return "\u2014"
+  const ms = Date.now() - new Date(iso).getTime()
+  if (!Number.isFinite(ms)) return "\u2014"
+  const mins = Math.round(ms / 60_000)
+  if (mins < 1) return "just now"
+  if (mins < 60) return `${mins} min ago`
+  const hours = ms / 3_600_000
+  if (hours < 24) return `${hours < 10 ? hours.toFixed(1) : Math.round(hours)}h ago`
+  return `${Math.round(hours / 24)}d ago`
+}
+
+/**
+ * How healthy a source looks, judged by when it last produced a *new* article.
+ *
+ * Article count alone hides a dying source: cached entries keep the list looking
+ * full until they expire, which is how kinhtechungkhoan sat dead for two weeks
+ * behind a plausible-looking number. Thresholds derive from the cache TTL so they
+ * stay correct if cache_ttl_hours changes.
+ *
+ * A healthy source gets no badge — colour stays reserved for what needs action.
+ */
+function freshness(
+  s: SourceRow,
+  ttlHours: number,
+): { tone: "ok" | "warn" | "danger"; label: string | null } {
+  if (!s.article_count) return { tone: "danger", label: "No data" }
+  if (!s.last_scraped_at) return { tone: "warn", label: "Unknown" }
+  const hours = (Date.now() - new Date(s.last_scraped_at).getTime()) / 3_600_000
+  if (!Number.isFinite(hours)) return { tone: "warn", label: "Unknown" }
+  if (hours >= ttlHours) return { tone: "danger", label: "Stale" }
+  if (hours >= ttlHours / 2) return { tone: "warn", label: "Quiet" }
+  return { tone: "ok", label: null }
+}
+
 function runTone(run: { timed_out?: boolean; sources_failed?: number }) {
   if (run.timed_out) return { tone: "warn" as const, label: "Timed out", Icon: AlertTriangle }
   if ((run.sources_failed ?? 0) > 0) return { tone: "danger" as const, label: "Partial", Icon: XCircle }
@@ -40,7 +83,7 @@ export default function DashboardPage() {
   const d = data?.data
   const cache = d?.cache || {}
   const totals = d?.llm_totals || {}
-  const sources: { name: string; domain: string; article_count: number }[] = d?.sources || []
+  const sources: SourceRow[] = d?.sources || []
 
   // Oldest-first for the chart (time reads left to right); the history table
   // below reverses it again so the newest run is on top.
@@ -53,7 +96,10 @@ export default function DashboardPage() {
   }))
 
   const errorCount = totals.error_count ?? 0
-  const emptySources = sources.filter((s) => !s.article_count).length
+  const ttlHours = (cache.ttl_config?.cache_ttl_seconds ?? 43_200) / 3600
+  const graded = sources.map((s) => ({ ...s, health: freshness(s, ttlHours) }))
+  const emptySources = graded.filter((s) => s.health.label === "No data").length
+  const attentionSources = graded.filter((s) => s.health.tone !== "ok").length
 
   function handleRefresh() {
     if (!confirm("Scrape every source for new articles now? This is the same work the 30-minute cycle does.")) return
@@ -85,8 +131,14 @@ export default function DashboardPage() {
         <StatsCard
           title="Sources with data"
           value={`${cache.news_sources ?? 0} / ${sources.length}`}
-          tone={emptySources > 0 ? "warn" : "ok"}
-          subtitle={emptySources > 0 ? `${emptySources} empty` : "all reporting"}
+          tone={emptySources > 0 ? "danger" : attentionSources > 0 ? "warn" : "ok"}
+          subtitle={
+            emptySources > 0
+              ? `${emptySources} with no data`
+              : attentionSources > 0
+                ? `${attentionSources} going quiet`
+                : "all fresh"
+          }
           icon={<Globe size={18} />}
         />
         <StatsCard
@@ -218,7 +270,10 @@ export default function DashboardPage() {
       )}
 
       <Card>
-        <CardHeader title="Sources" hint={`${sources.length} configured.`} />
+        <CardHeader
+          title="Sources"
+          hint={`${sources.length} configured \u00b7 flagged after ${Math.round(ttlHours / 2)}h without a new article`}
+        />
         <TableScroll>
           <table className="w-full">
             <thead className="bg-surface-2">
@@ -226,10 +281,12 @@ export default function DashboardPage() {
                 <th scope="col" className={thClass}>Name</th>
                 <th scope="col" className={thClass}>Domain</th>
                 <th scope="col" className={`${thClass} text-right`}>Articles</th>
+                <th scope="col" className={`${thClass} w-36`}>Newest article</th>
+                <th scope="col" className={`${thClass} w-24`}>State</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
-              {sources.map((s) => (
+              {graded.map((s) => (
                 <tr key={s.name} className="hover:bg-surface-2">
                   <td className={`${tdClass} font-medium`}>{s.name}</td>
                   <td className={`${tdClass} text-muted`}>{s.domain}</td>
@@ -237,8 +294,23 @@ export default function DashboardPage() {
                     {s.article_count ? (
                       s.article_count.toLocaleString()
                     ) : (
-                      <span className="text-warn">0</span>
+                      <span className="text-danger">0</span>
                     )}
+                  </td>
+                  <td
+                    className={`${tdClass} tnum text-xs ${
+                      s.health.tone === "danger"
+                        ? "text-danger"
+                        : s.health.tone === "warn"
+                          ? "text-warn"
+                          : "text-muted"
+                    }`}
+                    title={s.last_scraped_at || undefined}
+                  >
+                    {relTime(s.last_scraped_at)}
+                  </td>
+                  <td className="px-4 py-2">
+                    {s.health.label && <Badge tone={s.health.tone}>{s.health.label}</Badge>}
                   </td>
                 </tr>
               ))}

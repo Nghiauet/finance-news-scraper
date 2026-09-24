@@ -630,12 +630,22 @@ def get_cache_stats() -> dict:
             summary_count += 1
 
         source_counts = {}
+        source_last_scraped = {}
         for key in r.scan_iter("news:*", count=100):
             source_name = key.removeprefix("news:")
             raw = r.get(key)
             if raw:
                 articles = json.loads(raw)
                 source_counts[source_name] = len(articles)
+                # Newest scraped_at also answers "when did this source last
+                # yield new content". A cache-hit-only cycle keeps the original
+                # timestamps, so this ages as soon as a source stops producing
+                # even while its article count still looks healthy — which is
+                # exactly how a source can quietly die for weeks.
+                stamps = [a.get("scraped_at") for a in articles
+                          if isinstance(a.get("scraped_at"), str)]
+                if stamps:
+                    source_last_scraped[source_name] = max(stamps)
 
         info = r.info("memory")
         return {
@@ -644,6 +654,7 @@ def get_cache_stats() -> dict:
             "summary_count": summary_count,
             "news_sources": len(source_counts),
             "source_counts": source_counts,
+            "source_last_scraped": source_last_scraped,
             "memory_used_mb": round(info.get("used_memory", 0) / (1024 * 1024), 2),
             "ttl_config": {
                 "cache_ttl_seconds": _get_cache_ttl(),

@@ -515,7 +515,8 @@ def _build_sources_info() -> tuple[list[dict], dict]:
     cache = cache_client.get_cache_stats()
     sources_info = [
         {"name": name, "url": cfg["url"], "domain": cfg["domain"],
-         "article_count": cache.get("source_counts", {}).get(name, 0)}
+         "article_count": cache.get("source_counts", {}).get(name, 0),
+         "last_scraped_at": cache.get("source_last_scraped", {}).get(name)}
         for name, cfg in SOURCES.items()
     ]
     return sources_info, cache
