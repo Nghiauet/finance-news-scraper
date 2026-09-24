@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone, timedelta
 
 import redis
 from dotenv import load_dotenv
@@ -20,6 +21,20 @@ log = logging.getLogger(__name__)
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:12209")
 _DEFAULT_TTL = 259200  # 3 days fallback
+
+VN_TZ = timezone(timedelta(hours=7))
+
+
+def vn_now_iso() -> str:
+    """Current Vietnam time as ISO 8601 with a genuine +07:00 offset.
+
+    These timestamps used to be built with time.strftime("...+07:00"), which
+    pasted a fixed offset onto the container's local clock. The container has no
+    TZ set and therefore runs UTC, so every value claimed +07:00 while carrying a
+    UTC reading and came out 7 hours early.
+    """
+    return datetime.now(VN_TZ).strftime("%Y-%m-%dT%H:%M:%S+07:00")
+
 
 
 def _get_cache_ttl() -> int:
@@ -107,7 +122,7 @@ def set_article(
                 "title_en": title_en,
                 "summary_en": summary_en,
                 "content_en": content_en,
-                "scraped_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
+                "scraped_at": vn_now_iso(),
             },
             ensure_ascii=False,
         )
@@ -302,7 +317,7 @@ def add_model(config: dict) -> str | None:
             "base_url": config["base_url"],
             "api_key": config["api_key"],
             "model_name": config["model_name"],
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S+07:00"),
+            "created_at": vn_now_iso(),
         })
         pipe.rpush("models:list", mid)
         pipe.execute()

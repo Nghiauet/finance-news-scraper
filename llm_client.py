@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import date
+from datetime import datetime
 from typing import Optional
 
 from openai import APIStatusError, OpenAI
@@ -422,7 +422,7 @@ def extract_and_summarize(text: str, deadline: Optional[float] = None) -> Option
                 resp = client.chat.completions.create(
                     model=config.model_name,
                     messages=[
-                        {"role": "system", "content": _SYSTEM_PROMPT.format(today=date.today().isoformat())},
+                        {"role": "system", "content": _SYSTEM_PROMPT.format(today=datetime.now(cache_client.VN_TZ).date().isoformat())},
                         {"role": "user", "content": truncated},
                     ],
                     response_format={"type": "json_object"},

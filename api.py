@@ -225,6 +225,7 @@ async def _do_refresh():
     refresh_timeout = settings_mod.get_setting("refresh_timeout")
     articles_per = settings_mod.get_setting("articles_per_source")
     log.info("[CRON] refresh started — %d sources, timeout %ds", total, refresh_timeout)
+
     # One cheap ping before fanning out to 13 sources: a retired model then
     # costs a single request instead of the entire refresh budget, and the
     # failover happens before any article is attempted.

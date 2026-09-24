@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
@@ -119,10 +120,11 @@ def get_article_links(url: str, domain: str, weak_ssl: bool = False,
         title = a.get_text(strip=True)
         if not href or not title or len(title) < 15:
             continue
-        if href.startswith("//"):
-            href = f"https:{href}"
-        elif not href.startswith("http"):
-            href = f"https://{domain}{href}"
+        # urljoin handles absolute, protocol-relative, root-relative and
+        # path-relative hrefs alike. The old f"https://{domain}{href}" silently
+        # produced "https://domain.vnsome-slug" for any href without a leading
+        # slash, which then failed DNS — kinhtechungkhoan lost 17 of 20 links.
+        href = urljoin(url, href)
         if domain in href:
             articles.append({"title": title, "url": href})
 
@@ -230,7 +232,9 @@ SOURCES = {
     "dantri": {"url": "https://dantri.com.vn/kinh-doanh.htm", "domain": "dantri.com.vn"},
     "thanhnien": {"url": "https://thanhnien.vn/kinh-te.htm", "domain": "thanhnien.vn"},
     "vneconomy": {"url": "https://vneconomy.vn/chung-khoan.htm", "domain": "vneconomy.vn"},
-    "kinhtechungkhoan": {"url": "https://kinhtechungkhoan.vn/", "domain": "kinhtechungkhoan.vn"},
+    # The bare homepage went client-side rendered and serves no article links;
+    # /chung-khoan is still server-rendered and topically narrower.
+    "kinhtechungkhoan": {"url": "https://kinhtechungkhoan.vn/chung-khoan", "domain": "kinhtechungkhoan.vn"},
     "thoibaonganhang": {"url": "https://thoibaonganhang.vn/thi-truong-chung-khoan-24.html", "domain": "thoibaonganhang.vn"},
     "cafebiz": {"url": "https://cafebiz.vn/cau-chuyen-kinh-doanh/chung-khoan.chn", "domain": "cafebiz.vn"},
     "nguoiquansat": {"url": "https://nguoiquansat.vn/chung-khoan/", "domain": "nguoiquansat.vn"},
@@ -310,7 +314,7 @@ def scrape_source(
             log.warning("[%s] [%s] page fetch failed — skipping", source_name, n)
             continue
 
-        now = time.strftime("%Y-%m-%dT%H:%M:%S+07:00")
+        now = cache_client.vn_now_iso()
         parsed = extract_and_summarize(page_text, deadline=deadline)
         if parsed:
             # Prefer the source's authoritative date over the LLM's guess, then
